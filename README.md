@@ -1,57 +1,81 @@
 # dsh-cognee-memory
 
-A DSH (DeepSeek Harness) Cordis plugin project that will give DSH agents a **persistent
-memory backed by Cognee** — recall across sessions, and write-back of durable facts.
+A DSH (DeepSeek Harness) Cordis plugin that gives agents **persistent memory
+backed by Cognee** — bounded recall injected as untrusted prompt context, plus
+explicit remember/forget/status tools and authoritative task-outcome write-back.
 
-## Status: PHASE 0 — research only
+## Status: PHASE 1 — scaffold + core architecture + unit tests
 
-This repository currently contains **no implementation code**. It holds the verified
-research that Phase 1 will be designed against.
+Version `0.1.0`. The package builds and tests with mocks only:
 
-- No Cognee server has been contacted.
-- Nothing under the DSH installation (`/opt/homebrew/lib/node_modules/@deepseek-ai/dsh`)
+- No Cognee server has been contacted (not `10.20.10.15:8000`, not any other).
+- Nothing under `/opt/homebrew/lib/node_modules/@deepseek-ai/dsh` or `~/.dsh`
   has been modified.
-- The live `web` profile under `~/.dsh/profiles/web/` has **not** been modified.
+- No profile has been mounted yet; that is Phase 3.
+- Cognee 1.6 REST paths and MCP tool names are **UNVERIFIED** and isolated in
+  [`src/adapters/cognee-paths.ts`](src/adapters/cognee-paths.ts). See
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.1.
 
-## Read this first
+## Read first
 
-**[`docs/RESEARCH.md`](docs/RESEARCH.md)** — the verified DSH 0.2.1-rc.5 plugin contract:
-plugin package shape, tool registration API, system-prompt contribution API, the agent
-and session lifecycle hooks that actually exist, the profile / `cordis.patch.yml`
-mechanism, and the MCP client config surface. Every claim carries a `file:line` or URL
-citation; unproven items are marked **UNVERIFIED** / **NOT FOUND**.
+- **[`docs/RESEARCH.md`](docs/RESEARCH.md)** — verified DSH 0.2.1-rc.5 plugin
+  contract with `file:line` citations.
+- **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — Phase 1 design, security
+  model, unverified API list, and the Phase 2–8 roadmap.
 
-**§12 OPEN BLOCKERS** in that document lists what must be decided or obtained before
-implementation can start — most importantly whether Cognee exposes an MCP endpoint
-(which would make this a config-only integration) and what its URL/auth are.
+## What works today
+
+| Area | Behavior |
+| --- | --- |
+| Plugin | ESM Cordis plugin: `name`, `inject = ['tools','systemPrompt']`, zod `Config`, `apply()` |
+| Tools | `memory_recall`, `memory_remember`, `memory_forget`, `memory_status`, typed params/output, structured errors, full dispose |
+| Prompt | Per-agent `ctx.systemPrompt.context()` block, bounded by items/tokens, explicitly untrusted, injection-neutralized, silently degrades |
+| Memory | Stable hashed scopes (session/agent/project/team/global), deny-by-default filtering, exact + near dedup, retention planning |
+| Security | env-only tokens, header/endpoint redaction, pre-write credential rejection/redaction |
+| Transports | Cognee REST and Streamable-HTTP MCP adapters with timeouts, retries/backoff, circuit breaker; `auto` resolution; `mcp-stdio` reserved |
+| Tests | Vitest: 25 files, 206 tests; mock HTTP server and fake adapters only |
+
+## Build and test
+
+Requires Node >= 22 and pnpm.
+
+```bash
+pnpm install
+pnpm build       # strict tsc, ESM declarations to lib/
+pnpm test        # vitest run — 25 files / 206 tests
+pnpm typecheck   # tsc --noEmit
+```
+
+## Configuration sketch
+
+```yaml
+- insert:
+    - id: cognee-memory
+      name: dsh-cognee-memory
+      config:
+        enabled: true
+        transport: auto
+        apiBaseUrl: http://127.0.0.1:8000
+        # mcpUrl: http://127.0.0.1:8000/mcp
+        authMode: none              # none | bearer | api-key
+        apiTokenEnv: COGNEE_API_TOKEN
+        failureMode: open           # open: prompt recall degrades; closed: surface errors
+```
+
+Secrets are read **only** from the configured environment variable. Do not put
+tokens in YAML. Do not overwrite a profile's `cordis.patch.yml`; merge an
+`insert:` entry instead (see `docs/RESEARCH.md` §7).
 
 ## Evidence
 
 | Path | Contents |
 | --- | --- |
-| [`docs/research/dump-config-web.yml`](docs/research/dump-config-web.yml) | verbatim `dsh --profile web --dump-config` output (204 top-level + 135 nested rows) |
-| [`docs/research/cli-help.txt`](docs/research/cli-help.txt) | `dsh --version`, `dsh --help`, `dsh plugin --help` |
-| [`docs/research/patch-schema-excerpt.json`](docs/research/patch-schema-excerpt.json) | trimmed `--dump-config-schema` (patch/entry definitions) |
-| [`docs/research/upstream/`](docs/research/upstream/) | the five upstream docs as fetched (HTTP 200), for provenance |
+| [`docs/RESEARCH.md`](docs/RESEARCH.md) | verified DSH plugin contract + open blockers |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Phase 1 architecture + limitations |
+| [`docs/research/`](docs/research/) | verbatim `--dump-config`, CLI help, patch schema, upstream docs |
 
-## Layout
+## Roadmap
 
-```
-docs/
-  RESEARCH.md              verified contract + open blockers
-  research/
-    dump-config-web.yml    composed profile tree (evidence)
-    cli-help.txt           CLI help capture (evidence)
-    patch-schema-excerpt.json  patch/entry JSON Schema (evidence)
-    upstream/              upstream docs as fetched (architecture, cordis-primer,
-                           mcp-client README, system-prompt subsystem, mcp-memory guide)
-```
-
-## Environment (verified)
-
-| Item | Value |
-| --- | --- |
-| DSH | `0.2.1-rc.5`, commit `c3286d37c37f71b186a7e6647092bf2b56d1d690` |
-| Node / npm / pnpm | `v25.4.0` / `11.7.0` / `12.16.1` |
-| `DSH_HOME` | `/Users/varad/.dsh` |
-| Active profile | `web` (`dsh web`, PID 56806, `127.0.0.1:3080`) |
+Phases 2–8 (backend verification, throwaway-profile integration, authoritative
+task write-back, prune/retention, prompt tuning, health endpoint, release) are
+listed in `docs/ARCHITECTURE.md` §8.
