@@ -1,0 +1,115 @@
+{
+  "_note": "Excerpt of `dsh --profile web --dump-config-schema` (full output 980830 bytes). Only the generic patch/entry definitions are kept; the 100+ per-plugin config defs and per-id if/then blocks are omitted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cordis configuration for profile web",
+  "description": "Describes the parsed entry-list YAML printed by --dump-config. Use $defs.patchList for a profile/home/CLI overlay. Parse !!js with the Cordis entry-list YAML dialect. Expression results, service dependencies, plugin startup checks, and sequence-dependent patch targets still require runtime validation.",
+  "$comment": "Bundle, profile, home, and CLI layers apply in that order. A patch config replaces the whole config. JSON Schema defaults are annotations; Schemastery validates a fallback on null/omission unless required rejects it first. Schemastery unions select the first successful branch. Root patch id constraints describe the current index, not ids introduced or changed by earlier patches. Include-local patches have a separate index. Relative plugin insertions require their source patch directory; this document does not infer future overlay locations.",
+  "$defs": {
+    "loaderExpression": {
+      "type": "object",
+      "properties": {
+        "__jsExpr": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "__jsExpr"
+      ],
+      "description": "Inert representation of a YAML !!js scalar from the Cordis entry-list parser. Its result is evaluated and validated only at runtime. Extra marker-object fields are ignored by interpolation."
+    },
+    "entryMetadata": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Entry id. Loader generates an id when an entry omits it; patches use the configured id."
+        },
+        "name": {
+          "type": "string",
+          "description": "Plugin module specifier. Inserted relative plugin paths are anchored beside their patch file."
+        },
+        "config": {},
+        "group": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Allows patch indexing and insertion into an entry-list config; does not select the plugin implementation."
+        },
+        "disabled": {
+          "anyOf": [
+            {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/loaderExpression"
+            }
+          ],
+          "description": "Boolean or !!js expression. The Loader coerces other truthy values as disabled; this schema rejects them."
+        },
+        "inject": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intercept": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "isolate": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "const": true
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "entryList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    },
+    "patchList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/patch"
+      }
+    },
+    "patch": {
+      "type": "object",
+      "allOf": "<omitted: 135702 bytes of per-plugin id if/then>",
+      "properties": {
+        "insert": {
+          "$ref": "#/$defs/entryList"
+        }
+      }
+    }
+  }
+}
