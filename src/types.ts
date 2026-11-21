@@ -1,0 +1,191 @@
+/** Lossless JSON value used at adapter and tool boundaries. */
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
+
+/** The five memory scopes, broadest last. */
+export const MEMORY_SCOPES = ['session', 'agent', 'project', 'team', 'global'] as const
+export type MemoryScope = (typeof MEMORY_SCOPES)[number]
+
+/** One stable, backend-safe scope identity. `id` never contains the raw session id. */
+export interface ScopeRef {
+  readonly scope: MemoryScope
+  readonly id: string
+}
+
+/** Where a memory came from. Only authoritative evidence kinds are accepted for writes. */
+export type ProvenanceKind = 'user_explicit' | 'tool_call' | 'task_outcome' | 'session_event' | 'import'
+
+export interface Provenance {
+  readonly kind: ProvenanceKind
+  /** Producer that observed the evidence (tool name, hook name, importer). */
+  readonly source: string
+  readonly recordedAt: string
+  readonly sessionId?: string
+  readonly agentId?: string
+  readonly taskId?: string
+  readonly turn?: number
+  readonly step?: number
+  /** Stable pointer to the authoritative record, never free-form model prose. */
+  readonly evidence?: string
+}
+
+export interface MemoryRecord {
+  readonly id: string
+  readonly text: string
+  readonly scope: ScopeRef
+  readonly createdAt: string
+  readonly tags?: readonly string[]
+  readonly provenance?: Provenance
+  readonly metadata?: Readonly<Record<string, JsonValue>>
+}
+
+export interface RememberInput {
+  readonly text: string
+  readonly scope: ScopeRef
+  readonly tags?: readonly string[]
+  readonly provenance: Provenance
+  readonly dedupeKey?: string
+  readonly metadata?: Readonly<Record<string, JsonValue>>
+  readonly signal?: AbortSignal
+}
+
+export interface RememberResult {
+  readonly id: string
+  readonly scope: ScopeRef
+  readonly createdAt: string
+  readonly deduplicated: boolean
+}
+
+export interface RecallQuery {
+  readonly text: string
+  readonly scopes: readonly ScopeRef[]
+  readonly limit: number
+  readonly minScore?: number
+  readonly signal?: AbortSignal
+}
+
+export interface RecallHit {
+  readonly record: MemoryRecord
+  /** Backend relevance in [0, 1] when supplied, otherwise a deterministic local rank. */
+  readonly score: number
+}
+
+export interface ForgetInput {
+  readonly id: string
+  readonly scope: ScopeRef
+  readonly signal?: AbortSignal
+}
+
+export interface ForgetResult {
+  readonly id: string
+  readonly scope: ScopeRef
+  readonly forgotten: boolean
+}
+
+export interface HealthResult {
+  readonly ok: boolean
+  readonly latencyMs?: number
+  readonly message?: string
+}
+
+export interface AdapterStatus {
+  readonly transport: ResolvedTransport
+  readonly reachable: boolean
+  readonly checkedAt: string
+  readonly details?: Readonly<Record<string, JsonValue>>
+}
+
+export type TransportKind = 'mcp-http' | 'mcp-stdio' | 'rest' | 'auto'
+export type ResolvedTransport = Exclude<TransportKind, 'auto'>
+
+/**
+ * Transport-neutral memory backend. All adapters must implement every method;
+ * unsupported backend capabilities throw `UnsupportedOperationError` rather
+ * than silently degrading to a destructive call.
+ */
+export interface MemoryAdapter {
+  remember(input: RememberInput): Promise<RememberResult>
+  recall(query: RecallQuery): Promise<readonly RecallHit[]>
+  forget(input: ForgetInput): Promise<ForgetResult>
+  status(signal?: AbortSignal): Promise<AdapterStatus>
+  health(): Promise<HealthResult>
+}
+
+/** Caller identity available at a tool call or hook boundary. */
+export interface CallerIdentity {
+  readonly sessionId?: string
+  readonly agentId?: string
+  readonly projectId?: string
+  readonly teamId?: string
+}
+
+/** Structural view of a DSH agent; avoids a hard import of the host package. */
+export interface AgentLike {
+  readonly session?: { readonly id?: unknown }
+}
+
+/** Minimal model-facing content block accepted by DSH tool renderers. */
+export interface TextContentBlock {
+  readonly type: 'text'
+  readonly text: string
+}
+
+/** Structural run context handed to a DSH tool body. */
+export interface ToolRunContextLike {
+  readonly signal: AbortSignal
+  readonly agent?: AgentLike
+}
+
+/** Structural definition accepted by `ctx.tools.register()` in DSH 0.2.1-rc.5. */
+export interface ToolDefinitionLike {
+  readonly name: string
+  readonly description: string
+  readonly parameters: Readonly<Record<string, unknown>>
+  readonly output: {
+    readonly schema: Readonly<Record<string, unknown>>
+    readonly render: (args: unknown, value: unknown) => readonly TextContentBlock[]
+  }
+  readonly timeoutMs?: number
+  readonly execute: (args: unknown, exec: ToolRunContextLike) => Promise<unknown>
+}
+
+export interface PromptContextRegistration {
+  readonly name: string
+  readonly order: number
+  readonly text: string | ((context: unknown) => string)
+  readonly interpolate?: boolean
+  readonly required?: boolean
+}
+
+export interface PromptSectionRegistration {
+  readonly name: string
+  readonly order: number
+  readonly text: string | ((context: unknown) => string)
+  readonly interpolate?: boolean
+  readonly complete?: boolean
+}
+
+export interface PluginLoggerLike {
+  debug(...args: unknown[]): void
+  info(...args: unknown[]): void
+  warn(...args: unknown[]): void
+  error(...args: unknown[]): void
+}
+
+/**
+ * Structural subset of the Cordis context this plugin uses. The real host
+ * context satisfies it structurally, which keeps the package buildable
+ * without vendoring DSH's type packages.
+ */
+export interface PluginContextLike {
+  readonly tools: {
+    register(definition: ToolDefinitionLike): () => void
+  }
+  readonly systemPrompt: {
+    context(registration: PromptContextRegistration): () => void
+    section(registration: PromptSectionRegistration): () => void
+  }
+  on(name: string, listener: (...args: never[]) => unknown): () => unknown
+  effect?(execute: () => (() => void) | void): () => unknown
+  logger?(name: string): PluginLoggerLike
+}
