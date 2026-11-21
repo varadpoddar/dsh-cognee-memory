@@ -29,19 +29,10 @@ implementation can start — most importantly whether Cognee exposes an MCP endp
 
 | Path | Contents |
 | --- | --- |
-| [`docs/research/dump-config-web.yml`](docs/research/dump-config-web.yml) | verbatim `dsh --profile web --dump-config` output (204 composed entries) |
+| [`docs/research/dump-config-web.yml`](docs/research/dump-config-web.yml) | verbatim `dsh --profile web --dump-config` output (204 top-level + 135 nested rows) |
 | [`docs/research/cli-help.txt`](docs/research/cli-help.txt) | `dsh --version`, `dsh --help`, `dsh plugin --help` |
-| [`docs/research/UPSTREAM-NOTES.md`](docs/research/UPSTREAM-NOTES.md) | upstream doc extraction with fetch log |
-| [`docs/research/INSTALLED-API.md`](docs/research/INSTALLED-API.md) | installed-package API archaeology |
-
-## Environment (verified)
-
-| Item | Value |
-| --- | --- |
-| DSH | `0.2.1-rc.5`, commit `c3286d37c37f71b186a7e6647092bf2b56d1d690` |
-| Node / npm / pnpm | `v25.4.0` / `11.7.0` / `12.16.1` |
-| `DSH_HOME` | `/Users/varad/.dsh` |
-| Active profile | `web` (`dsh web`, PID 56806, `127.0.0.1:3080`) |
+| [`docs/research/patch-schema-excerpt.json`](docs/research/patch-schema-excerpt.json) | trimmed `--dump-config-schema` (patch/entry definitions) |
+| [`docs/research/upstream/`](docs/research/upstream/) | the five upstream docs as fetched (HTTP 200), for provenance |
 
 ## Layout
 
@@ -51,6 +42,16 @@ docs/
   research/
     dump-config-web.yml    composed profile tree (evidence)
     cli-help.txt           CLI help capture (evidence)
-    UPSTREAM-NOTES.md      upstream docs extraction
-    INSTALLED-API.md       installed-package API archaeology
+    patch-schema-excerpt.json  patch/entry JSON Schema (evidence)
+    upstream/              upstream docs as fetched (architecture, cordis-primer,
+                           mcp-client README, system-prompt subsystem, mcp-memory guide)
 ```
+
+## Environment (verified)
+
+| Item | Value |
+| --- | --- |
+| DSH | `0.2.1-rc.5`, commit `c3286d37c37f71b186a7e6647092bf2b56d1d690` |
+| Node / npm / pnpm | `v25.4.0` / `11.7.0` / `12.16.1` |
+| `DSH_HOME` | `/Users/varad/.dsh` |
+| Active profile | `web` (`dsh web`, PID 56806, `127.0.0.1:3080`) |

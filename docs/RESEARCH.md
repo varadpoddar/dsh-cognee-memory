@@ -58,7 +58,8 @@ The `desktop` profile is present on disk but not running.
 
 The composed `web` tree was captured with `dsh --profile web --dump-config`
 (saved verbatim at [`docs/research/dump-config-web.yml`](research/dump-config-web.yml)):
-**204 tree entries, 29 of them `disabled: true`**, composed from 8 bundle layers plus
+**204 top-level rows plus 135 rows nested inside agent presets (339 total), 29 of them
+`disabled: true`**, composed from 8 bundle layers plus
 the user patch layer. Representative tool rows:
 
 ```yaml
@@ -264,8 +265,12 @@ All of the following are declared in merge-extensible event interfaces, so
 | `session/event` | 61 | `(session, event: SessionEvent) => void` |
 | `session/flush` | 69 | `(session) => Promise<void> \| void` |
 
-**Prompt hook** — `system-prompt/assemble` (`@mode waterfall`) at
-`$PKG/dsh-system-prompt/lib/types/index.d.ts:27`.
+**Prompt hooks** — `$PKG/dsh-system-prompt/lib/types/index.d.ts`:
+
+| Event | Line | Mode |
+| --- | --- | --- |
+| `system-prompt/assemble` | 27 | `@mode waterfall` — *"Expert waterfall over the assembled sections, contexts, tools, and variables"* |
+| `system-prompt/change` | 33 | `@mode emit` — fired on registration and disposal (`lib/index.js:222`) |
 
 **Tools hook** — `tools/change` (`@mode emit`) at `$PKG/dsh-tools/lib/types/index.d.ts:~100`.
 
@@ -385,6 +390,10 @@ Two consequences worth carrying into Phase 1:
   the live `web` tree are disabled this way.
 - **`config` replaces wholesale.** A patch that sets one field of a plugin's config must
   restate the others, or they fall back to schema defaults.
+- **There is a home-level patch layer** at `$DSH_HOME/cordis.patch.yml` that applies to
+  *every* profile, between the profile patch and `--patch` overlays
+  (`docs/architecture.md:25`, and `docs/user/guide/mcp-memory.md:33` recommends it for
+  machine-wide choices). No such file exists in this install today.
 
 **Adding a third-party package to a profile** is done through the CLI, which forwards to
 pnpm inside the profile directory — `dsh plugin --profile <name> add <pkg>`
@@ -454,7 +463,138 @@ export function apply(ctx, config) {
 
 ## 10. Upstream documentation findings
 
-<!-- FILLED FROM UPSTREAM FETCH -->
+The installed package ships no `docs/`, so these were fetched from
+`https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/master/<path>`. **All five
+succeeded (HTTP 200) on the `raw` host** — the `github.com/.../blob/...` fallback was not
+needed. Fetch log:
+
+| Path | HTTP | Bytes |
+| --- | --- | --- |
+| `docs/architecture.md` | 200 | 19132 |
+| `docs/cordis-primer.md` | 200 | 4136 |
+| `packages/mcp/mcp-client/README.md` | 200 | 32409 |
+| `docs/subsystems/system-prompt.md` | 200 | 13403 |
+| `docs/user/guide/mcp-memory.md` | 200 | 6695 |
+
+### 10.1 What the docs confirm about the contract
+
+- **A plugin is a Service**; concretely *"a function with optional `inject` and
+  `apply(ctx)` fields, or a `Service` subclass"* — `docs/cordis-primer.md:9`. This matches
+  what I read out of the installed `.d.ts` files (§3).
+- **Services are claimed by key** on the context — `ctx.tools`, `ctx.llm`, `ctx.sessions`
+  — and **`inject` declares the dependency**, *"so load order is expressed through service
+  requirements rather than manual boot sequencing"* — `docs/cordis-primer.md:10-11`.
+- **Dispatch modes are part of an event's public contract**, documented with an `@mode`
+  tag — `docs/cordis-primer.md:19-27`. The five modes are `emit`, `waterfall`, `parallel`,
+  `serial`, `bail` with stated await/order/return semantics.
+- **Waterfall is around-middleware**: a listener gets `(...args, next)`, calls `next()` to
+  delegate, and *"return without `next()` to short-circuit"* — `docs/cordis-primer.md:31-35`.
+- **Registrations are reversible effects**: *"Prompt sections, tool schemas, adapters,
+  providers, and listeners are installed through `ctx.effect()` or `ctx.on()` so reload
+  and teardown unwind them predictably"* — `docs/cordis-primer.md:13,44`. This matches the
+  disposer-returning `register()` signatures in §4/§5.
+- **`package.json` declares composition under a `dsh` field**: *"`dsh.profile` lists a
+  profile's bundles, and `dsh.bundle` points at a bundle's patch file"* —
+  `docs/architecture.md:24`. Confirms §3.1.
+- **A bundle is a distribution format for config rows**, so *"whatever it inserts stays
+  patchable by the layers above it"* — `docs/architecture.md:19`.
+- **Layer order and patch semantics**: *"the profile's ordered bundles, its
+  `cordis.patch.yml`, the home patch, then `--patch` overlays. A patch targets a row by id
+  and replaces its whole config, or inserts new rows"* — `docs/architecture.md:25`. This
+  independently confirms the schema's *"config replaces the whole config"* (§7.1) and adds
+  two facts I had not derived: there is a **home patch** at `$DSH_HOME/cordis.patch.yml`
+  that applies to every profile, and a `preset` patch applies the same operations inside
+  a declaration's `config.plugins`.
+- **The capability table** states the intended extension points plainly: *"Add a
+  model-facing capability → register on `ctx.tools`; its schema joins prompt assembly"* —
+  `docs/architecture.md:151`. The service map lists `ctx.systemPrompt` for *"Prompt-section
+  and tool-schema assembly"* and `ctx.tools` for *"The scoped tool registry and guarded
+  execution pipeline"* — `docs/architecture.md:60-61`.
+- **`ctx.systemPrompt` API** is documented with the same signatures I read in the `.d.ts`:
+  `section(section: PromptSection): () => void`, `context(context: PromptContext): () => void`,
+  `getSectionOrder`, `getContextOrder`, `suppressRuntimeContext` —
+  `docs/subsystems/system-prompt.md:120-160`. The prose *"Registry service for the prompt
+  inputs assembled before each model step"* and *"Registration and disposal emit
+  `system-prompt/change`"* match `lib/types/index.d.ts:33` in the installed tree.
+
+### 10.2 `agent/pre-step` semantics (resolves an earlier UNVERIFIED)
+
+`docs/architecture.md:84-92` gives the loop with the hook in place:
+
+```text
+turn/start
+  claim next-step input plus one queued message
+  snapshot Session model selection; assemble prompt sections + step-admitted tool schemas
+  -> agent/pre-step; project runtime context at fallback
+                                     reject | enter(messages, startsRequestSeries?)
+     reject, or a first enter rewritten empty -> close the turn with no step
+     step/start
+```
+
+and `docs/architecture.md:114`: *"`agent/pre-step` listeners accept, rewrite, or reject
+claimed messages; a rejected or empty first claim closes a durable turn without a step."*
+It also confirms the dispatch modes: *"`agent/pre-step`, `agent/request`, `llm/stream`, and
+the three `tools/*` events are waterfalls, whose listeners must call `next()` to delegate;
+`agent/turn-stopping` is serial and has no `next()`"* — `docs/architecture.md:108`.
+
+So the correct way to influence a turn from a hook is a **waterfall decision object**, not
+a prompt mutation.
+
+### 10.3 DSH already ships a documented memory-integration pattern
+
+`docs/user/guide/mcp-memory.md` is a first-party guide titled *"Connect a third-party
+memory MCP server"*, describing **three default-off reference configs** (Memorix, MCP
+Reference Memory, Engram) wired through `@deepseek-ai/dsh-mcp-client`. Facts that bear
+directly on this project:
+
+- *"DSH parses the selected Cordis overlay, starts a configured stdio command or connects
+  to a configured Streamable HTTP URL, discovers MCP tools, and exposes them as
+  `mcp__<serverName>__<tool>`"* — `mcp-memory.md:11`.
+- *"No memory server is present in the shipped composition, so omitting `--patch` keeps all
+  three disabled"* — `mcp-memory.md:31`. (Consistent with §2: no `dsh-mcp-client` row in the
+  live `web` tree.)
+- Persisting a choice: *"merge the chosen file's single `insert` patch into a user patch
+  layer — `$DSH_HOME/profiles/<name>/cordis.patch.yml` for one profile, or
+  `$DSH_HOME/cordis.patch.yml` for every profile on the machine"* — `mcp-memory.md:33`.
+- The canonical `insert` row shape, exactly as I verified locally:
+  ```yaml
+  - insert:
+      - id: memory-my-server
+        name: '@deepseek-ai/dsh-mcp-client'
+        config:
+          serverName: my-memory
+          transport: stdio
+          command: my-memory-mcp
+          args: []
+          env: {}
+          cwd: !!js process.cwd()
+  ```
+  with *"For a remote server, use `transport: streamable-http`, `url`, and `headers`
+  instead"* — `mcp-memory.md:86-101`.
+- Security note worth carrying forward: *"The stdio bridge deliberately removes ambient
+  variables whose names usually identify credentials and all `DSH_*` variables before
+  launching a child"*, and secrets should go in the row's `config.env`, *"instead of
+  putting the secret directly in YAML"* — `mcp-memory.md:13`.
+- The guide also supplies an acceptance protocol I intend to reuse verbatim (write in
+  session A, recall in a fresh session B, then use the value; *"A new DSH session is
+  required; a Host restart is not"*) — `mcp-memory.md:74-82`.
+
+**Implication for Cognee:** if Cognee speaks MCP over Streamable HTTP, this project is a
+**configuration + documentation deliverable**, not a code plugin. That is blocker #3.
+
+### 10.4 Doc vs installed divergence — evidence that "installed wins"
+
+The docs are `master`; the install is `0.2.1-rc.5` (commit `c3286d37…`). I found at least
+one concrete drift, which is why every design decision here cites the installed tree:
+
+| Capability | Documented on `master` | Present in installed `0.2.1-rc.5`? |
+| --- | --- | --- |
+| `toolLoading: 'eager' \| 'on-demand'` + `mcp__<serverName>__load_tools` | `packages/mcp/mcp-client/README.md:71,107-109` | **NO** — `grep -rn toolLoading` over `$PKG/dsh-mcp-client/lib/types/*.d.ts` and `lib/index.js` returns **nothing**; the installed `StdioConfig`/`StreamableHttpConfig` have no such field (§8) |
+| OAuth for MCP servers | `mcp-client/README.md:121` | **UNVERIFIED** — not traced in this phase |
+| `system-prompt/change` event | `system-prompt.md:133` | **YES** — `$PKG/dsh-system-prompt/lib/types/index.d.ts:33` |
+
+**Recommendation for Phase 1: pin to the installed `0.2.1-rc.5` types, not the docs.**
+
 
 ---
 
@@ -467,9 +607,16 @@ export function apply(ctx, config) {
   Where docs and installed `.d.ts` disagreed, I treated the **installed code as
   authoritative** and said so.
 - **Cognee's HTTP/MCP API surface** — out of scope for this phase; no server contacted.
-- **Behaviour of `agent/pre-step`'s `PreStepDecision` at runtime** (what a listener may
-  legally change) — the return type is declared but I did not trace the loop's
-  consumption of it. **UNVERIFIED**: exact semantics/limits of `PreStepDecision`.
+- **Behaviour of `agent/pre-step`'s `PreStepDecision` *in the installed runtime*** — the
+  return type is declared (`runtime-types.d.ts:304`) and upstream `master` documents the
+  semantics (§10.2: accept/rewrite/reject claimed messages), but I did not trace the
+  installed loop's consumption of the decision object. Treat §10.2 as
+  **documented-upstream, drift-possible**; confirm against the installed loop before
+  relying on it.
+- **MCP OAuth support in `0.2.1-rc.5`** — advertised by the `master` README
+  (`mcp-client/README.md:121`) but not traced in the installed package (§10.4).
+- **`toolLoading: 'on-demand'` in `0.2.1-rc.5`** — documented upstream, **absent** from the
+  installed package (§10.4). Do not design against it.
 - **Whether `ctx.systemPrompt.context()` or `section()` is the better channel for
   injecting recalled memory** — both exist; choosing is a design decision, not a fact.
 
@@ -486,22 +633,32 @@ These block the design phase. I could not resolve them from the installation.
    live — `$DSH_HOME/.credentials.yaml`, an env var referenced by `!!js`, or the
    profile `config` block? Note `$DSH_HOME/.credentials.yaml` exists and is `0600`, but
    I did **not** read it and no credential-integration API was investigated this phase.
-3. **Does Cognee expose an MCP endpoint?** This is the single highest-leverage unknown:
-   if yes, §8 says the integration can be config-only (`transport: 'streamable-http'`,
-   `url`, `headers`), with no plugin code and no tool-schema work.
-   If no, we must write an HTTP client plugin and design the tool `output.schema`.
+3. **Does Cognee expose an MCP endpoint?** This is the single highest-leverage unknown.
+   DSH already ships a first-party guide for exactly this shape of integration with three
+   reference memory servers (§10.3), so **if Cognee speaks MCP, this project is a config
+   diff plus docs**: one `insert:` row with `transport: 'streamable-http'`, `url`,
+   `headers` — no plugin code and no tool-schema work. If Cognee is HTTP-only, we must
+   write a client plugin and design the tool `output.schema`.
+   Note the transport menu is only `stdio` and `streamable-http` (§8); a plain REST API
+   would need our own plugin.
 4. **Which memory operations are in scope** (add / search / recall / cognify / prune) and
    their request/response JSON shapes — needed to author `parameters` +
    `output.schema` and `render`.
 5. **Injection channel decision** (design, needs lead sign-off): `systemPrompt.section`
    (static prompt section), `systemPrompt.context` (durable user-role snapshot per turn),
    or a `recall` *tool* the model calls on demand. All three are technically available
-   (§4, §5); they have very different token-cost and freshness behaviour.
+   (§4, §5); they have very different token-cost and freshness behaviour. The shipped
+   reference pattern (§10.3) is **tool-first** and treats prompt injection as optional
+   additive guidance — that is the lowest-risk starting point.
 6. **Is a `/recall` HTTP route actually required?** It is implementable via
    `ctx.webServer.register` (§6.2) but adds an unauthenticated surface on the same
    listener as the GUI (`127.0.0.1:3080` today). Needs an explicit decision, and auth
    design if yes.
-7. **Target profile.** The live GUI is the `web` profile; adding the plugin there means
+7. **Credential placement.** If Cognee needs a token, the documented place for an MCP row
+   is the row's `config.env`, *not* inline YAML, because the stdio bridge scrubs ambient
+   credential-looking variables and all `DSH_*` vars before spawning a child
+   (`docs/user/guide/mcp-memory.md:13`). Confirm the intended secret store before Phase 1.
+8. **Target profile.** The live GUI is the `web` profile; adding the plugin there means
    editing `~/.dsh/profiles/web/` (outside this repo) and restarting the running
    `dsh web` process (PID 56806). Confirm whether Phase 1 may touch that profile or must
    use a throwaway profile (`dsh cognee-dev --from-default-profile web`).
@@ -512,8 +669,10 @@ These block the design phase. I could not resolve them from the installation.
 
 | Artifact | What it proves |
 | --- | --- |
-| [`docs/research/dump-config-web.yml`](research/dump-config-web.yml) | verbatim composed `web` profile tree, 204 entries, layer annotations |
+| [`docs/research/dump-config-web.yml`](research/dump-config-web.yml) | verbatim composed `web` profile tree, 204 top-level + 135 nested rows, layer annotations |
 | [`docs/research/cli-help.txt`](research/cli-help.txt) | `dsh --help`, `dsh plugin --help`, `dsh --profile web --dump-config` header |
+| [`docs/research/patch-schema-excerpt.json`](research/patch-schema-excerpt.json) | patch/entry JSON Schema from `--dump-config-schema` |
+| [`docs/research/upstream/`](research/upstream/) | the five upstream docs as fetched (provenance for §10) |
 | `$DSH/package.json` | version, bin, exports, dependency graph |
 | `$PKG/dsh-tools/lib/types/{index,schema}.d.ts` | tool registry + `defineTool` contract |
 | `$PKG/dsh-system-prompt/lib/types/index.d.ts` | prompt section/context registry |
