@@ -108,6 +108,31 @@ Minimal profile entry:
 wrong token `401`. A saved Cognee URL applies to the next memory call; no
 restart is needed for the address alone.
 
+## Operator CLI
+
+The package ships a `memory` bin (run it from an installed profile):
+
+```bash
+DSH_HOME=/var/lib/deepseek-harness/.dsh \
+  node <profile>/node_modules/dsh-cognee-memory/lib/cli/main.js <command> ...
+```
+
+`import-history` backfills existing local conversation history:
+
+```bash
+memory import-history --scope project:<rawId> [--session <id>] [--state-file <path>] [--apply]
+```
+
+It is a dry run unless `--apply` is passed. The dry run reports scanned
+sessions/messages, candidate counts by operation, date range, target namespace,
+and redaction/skip counts without writing. Extraction reuses the live M3 policy:
+committed direct `user/message` text only, deterministic explicit commands
+(`remember …`, `forget …`, `actually …`) only, never whole transcripts and never
+hidden reasoning. Secrets are blocked before a write. Apply is idempotent and
+resumable through a state file keyed by the extraction idempotency key and the
+source ref (session id + message index); candidates are applied in timestamp
+order so a later correction supersedes the earlier fact.
+
 ## Upgrade
 
 ```bash

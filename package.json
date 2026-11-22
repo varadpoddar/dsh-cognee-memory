@@ -109,5 +109,8 @@
     "url": "https://github.com/deepseek-harness/dsh-cognee-memory/issues"
   },
   "author": "DeepSeek Harness contributors",
-  "sideEffects": false
+  "sideEffects": false,
+  "bin": {
+    "memory": "./lib/cli/main.js"
+  }
 }

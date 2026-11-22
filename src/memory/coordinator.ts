@@ -20,6 +20,7 @@ import { IdentityResolver } from './identity.js'
 import { RecallService, type RecallRequest } from './recall.js'
 import { scopeFromName, sameScope, scopesForIdentity } from './scopes.js'
 import type { ProvenanceIndex } from './provenance-index.js'
+import type { LedgerSourceRef, MemoryLedger } from './ledger.js'
 import { evaluateWrite } from './write-policy.js'
 
 export interface CoordinatorDependencies {
@@ -38,6 +39,12 @@ export interface CoordinatorDependencies {
    * authenticated detail route reads the same index. Never on the tool path.
    */
   readonly provenanceIndex?: Pick<ProvenanceIndex, 'recordRecall' | 'recordWrite' | 'markSuperseded'>
+  /**
+   * Optional durable record ledger. When present, every accepted durable write
+   * is mirrored locally so `memory export` can produce a portable bundle
+   * (Cognee exposes text only through search). Never on the tool path.
+   */
+  readonly ledger?: Pick<MemoryLedger, 'recordWrite' | 'markSuperseded'>
 }
 
 export interface RememberRequest {
@@ -52,6 +59,8 @@ export interface RememberRequest {
   readonly semanticKey?: string
   /** Id this write replaces (extraction pipeline). */
   readonly supersedes?: string
+  /** Bounded source refs (session id + message index) for export/backfill. */
+  readonly sourceRefs?: readonly LedgerSourceRef[]
   readonly signal?: AbortSignal
 }
 
@@ -109,6 +118,7 @@ export class MemoryCoordinator {
     ProvenanceIndex,
     'recordRecall' | 'recordWrite' | 'markSuperseded'
   > | undefined
+  private readonly ledger: Pick<MemoryLedger, 'recordWrite' | 'markSuperseded'> | undefined
 
   constructor(dependencies: CoordinatorDependencies) {
     this.adapter = dependencies.adapter
@@ -118,6 +128,7 @@ export class MemoryCoordinator {
     this.clock = dependencies.clock ?? (() => new Date())
     this.endpointSource = dependencies.endpoint
     this.provenanceIndex = dependencies.provenanceIndex
+    this.ledger = dependencies.ledger
     this.ephemeral = dependencies.ephemeral ?? new EphemeralSessionMemory(() => this.clock())
     this.identityResolver =
       dependencies.identityResolver ??
@@ -279,6 +290,37 @@ export class MemoryCoordinator {
           })
           if (request.supersedes !== undefined) {
             this.provenanceIndex.markSuperseded(request.supersedes, result.id)
+          }
+        } catch {
+          this.metrics?.increment('provenance.record.failures')
+        }
+      }
+      if (this.ledger !== undefined) {
+        try {
+          const sourceRefs =
+            request.sourceRefs ??
+            (request.provenance.sessionId === undefined
+              ? []
+              : [
+                  {
+                    sessionId: request.provenance.sessionId,
+                    messageIndex: request.provenance.turn ?? 0,
+                    producedAt: result.createdAt,
+                  },
+                ])
+          this.ledger.recordWrite({
+            recordId: result.id,
+            scope,
+            text: decision.text,
+            ...(request.semanticKey === undefined ? {} : { semanticKey: request.semanticKey }),
+            provenance: request.provenance,
+            sourceRefs,
+            createdAt: result.createdAt,
+            ...(request.supersedes === undefined ? {} : { supersedes: request.supersedes }),
+            ...(decision.redacted ? { redacted: true } : {}),
+          })
+          if (request.supersedes !== undefined) {
+            this.ledger.markSuperseded(request.supersedes, result.id)
           }
         } catch {
           this.metrics?.increment('provenance.record.failures')

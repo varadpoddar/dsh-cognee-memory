@@ -13,6 +13,7 @@ import {
   type CogneeMemoryConfig,
 } from './config/schema.js'
 import { createMemoryAdapter } from './adapters/memory-adapter.js'
+import { MemoryLedger, resolveLedgerPath } from './memory/ledger.js'
 import { MemoryCoordinator } from './memory/coordinator.js'
 import { Metrics } from './telemetry/metrics.js'
 import { registerAgentLifecycle } from './hooks/agent-lifecycle.js'
@@ -136,7 +137,18 @@ export function apply(
     filePath: resolveProvenancePath(process.env),
     logger: (message) => process.stderr.write(`dsh-cognee-memory: ${message}\n`),
   })
-  const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint, provenanceIndex: provenance })
+  // Portable-record ledger: mirrors accepted durable writes so export/import
+  // bundles carry text, semantic keys, provenance, and timestamps. A ledger
+  // failure never fails a write.
+  const ledger = new MemoryLedger({ filePath: resolveLedgerPath(process.env) })
+  const coordinator = new MemoryCoordinator({
+    adapter,
+    config,
+    metrics,
+    endpoint,
+    provenanceIndex: provenance,
+    ledger,
+  })
   // Bounded, read-only record of ids a recall actually returned; feeds the
   // settings page's `recall-verified` state.
   const verification = new RecallVerificationLedger()

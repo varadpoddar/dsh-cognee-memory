@@ -2,6 +2,11 @@
 
 ## 1.0.0 — 2026-11-22
 
+First stable release. No DSH core patch; the plugin still mounts through one
+profile row and uses only `ctx.tools.register`, `ctx.systemPrompt.*`, agent and
+session events, and `ctx.webServer.register`.
+
+
 ### Packaging
 
 - **The package now declares `dsh.bundle`** (`{"patch": "./cordis.patch.yml"}`),
@@ -15,9 +20,27 @@
   plain-dependency install is not re-registered: remove and re-add the package
   once (`dsh plugin --profile web remove dsh-cognee-memory` then `add <tgz>`).
 
-First stable release. No DSH core patch; the plugin still mounts through one
-profile row and uses only `ctx.tools.register`, `ctx.systemPrompt.*`, agent and
-session events, and `ctx.webServer.register`.
+
+### Added
+
+- **M13 `memory import-history` backfill.** A new `memory` CLI (bin
+  `./lib/cli/main.js`) scans `$DSH_HOME/sessions/**/session.v*.jsonl.zstd`,
+  decodes the concatenated Zstandard frames (a Node one-shot decompressor stops
+  at the first frame), and reuses the M3 extraction policy: committed direct
+  `user/message` text only, text blocks only, deterministic explicit commands
+  (`remember …`, `forget …`, `actually …`) only — never whole transcripts,
+  never hidden reasoning. Secrets are blocked before a write; the dry run
+  (default) reports counts, date range, candidate types, target namespaces, and
+  redaction/skip counts without writing. Apply is idempotent and resumable: the
+  state file records the extraction idempotency key plus the source ref
+  (session id + message index), and candidates are applied in timestamp order so
+  a later correction supersedes the earlier fact.
+- **Durable record ledger.** `src/memory/ledger.ts` mirrors every accepted
+  durable write (text, semantic key, provenance, confidence, timestamps, source
+  refs) because Cognee exposes raw text only through `/search`. Append-only,
+  0600, bounded text, redacted, never a credential; a ledger failure never
+  fails a memory write.
+
 
 ### Fixed
 
