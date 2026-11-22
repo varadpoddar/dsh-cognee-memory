@@ -112,11 +112,13 @@ const patches = {
   toolsOff: path.join(WORK, 'patch-tools-off.yml'),
   pluginOff: path.join(WORK, 'patch-plugin-off.yml'),
   other: path.join(WORK, 'patch-other-scope.yml'),
+  toolsOffOther: path.join(WORK, 'patch-other-scope-tools-off.yml'),
 }
 fs.writeFileSync(patches.base, patchYaml({ tools: true }), { mode: 0o644 })
 fs.writeFileSync(patches.toolsOff, patchYaml({ tools: false }), { mode: 0o644 })
 fs.writeFileSync(patches.pluginOff, patchYaml({ tools: false, enabled: false }), { mode: 0o644 })
 fs.writeFileSync(patches.other, patchYaml({ tools: true, projectId: OTHER_PROJECT }), { mode: 0o644 })
+fs.writeFileSync(patches.toolsOffOther, patchYaml({ tools: false, projectId: OTHER_PROJECT }), { mode: 0o644 })
 
 async function api(pathname, init = {}) {
   const response = await fetch(`${API_ORIGIN}${pathname}`, {
@@ -167,6 +169,7 @@ function runHeadless(prompt, patch, timeoutMs = 240_000) {
     ok = false
     out = `${caught.stdout ?? ''}\n${caught.stderr ?? ''}`
   }
+  try { fs.unlinkSync(promptFile) } catch { /* already gone */ }
   const events = []
   for (const line of out.split('\n')) {
     const trimmed = line.trim()
@@ -247,6 +250,15 @@ async function main() {
   if (MODE === 'cleanup') return cleanup()
   console.log(JSON.stringify({ step: 'start', runId: RUN_ID, project: EVAL_PROJECT }))
 
+  // No-memory baseline FIRST: the codewords do not exist anywhere yet, the
+  // plugin is disabled, and every tool is off, so a correct answer would have
+  // to come from the model itself. Ask the five planted questions.
+  const baselinePrompt =
+    'Answer each question on its own line. If you do not know, answer UNKNOWN.\n' +
+    facts.map((fact, index) => `${index + 1}. ${fact.question}`).join('\n')
+  const baselineRun = runHeadless(baselinePrompt, patches.pluginOff, 180_000)
+  const baselineCorrect = facts.filter((fact) => baselineRun.final.includes(fact.token)).length
+
   // Seed five facts through the harness (explicit tool path; tools enabled).
   for (const fact of facts) {
     const run = runHeadless(`Remember this project fact: ${fact.text} Reply DONE.`, patches.base)
@@ -297,7 +309,11 @@ async function main() {
   const cPrompt = `Remember that the maintenance window for this project is ${cToken}. Reply DONE.`
   const cBefore = await evalRecordCount()
   const cRun = runHeadless(cPrompt, patches.toolsOff, 180_000)
-  const cRetrievableMs = await waitForToken(evalScope, cToken, 120_000)
+  // The harness process may exit before the durable outbox drains; one fresh
+  // process recovers the outbox at plugin load. This is the plugin's own
+  // crash-safe path, not a helper write.
+  runHeadless('Reply with exactly OK.', patches.toolsOff, 120_000)
+  const cRetrievableMs = await waitForToken(evalScope, cToken, 150_000)
   const cAfter = cRetrievableMs === null ? null : await evalRecordCount()
   addScenario({
     id: 'C',
@@ -316,14 +332,16 @@ async function main() {
   for (let i = 0; i < 2; i += 1) {
     const run = runHeadless(cPrompt, patches.toolsOff, 180_000)
     dupRuns.push({ ok: run.ok, toolCalls: run.toolCalls })
-    await sleep(12_000)
   }
+  runHeadless('Reply with exactly OK.', patches.toolsOff, 120_000)
+  await waitForToken(evalScope, cToken, 60_000)
+  await sleep(2_000)
   const dupAfter = await evalRecordCount()
   const dupAdded = dupBefore === null || dupAfter === null ? null : Math.max(0, dupAfter - dupBefore)
 
   // D — recall the C fact in a new process.
   const dPrompt = 'What is the maintenance window code for this project? Reply with the code only.'
-  const dRun = runHeadless(dPrompt, patches.base, 180_000)
+  const dRun = runHeadless(dPrompt, patches.toolsOff, 180_000)
   const dCorrect = dRun.final.includes(cToken)
   addScenario({
     id: 'D',
@@ -347,7 +365,7 @@ async function main() {
     serviceState = `restart-failed: ${String(error).slice(0, 120)}`
   }
   await sleep(2_000)
-  const eRun = runHeadless(dPrompt, patches.base, 180_000)
+  const eRun = runHeadless(dPrompt, patches.toolsOff, 180_000)
   const eCorrect = eRun.final.includes(cToken)
   addScenario({
     id: 'E',
@@ -360,7 +378,7 @@ async function main() {
 
   // K — project + principal isolation.
   const otherFacts = facts[0]
-  const kRun = runHeadless(otherFacts.question, patches.other, 180_000)
+  const kRun = runHeadless(otherFacts.question, patches.toolsOffOther, 180_000)
   const projectIsolated = !kRun.final.includes(otherFacts.token)
   const principalToken = `eval-principal-${RUN_ID}`
   const coordinator = new MemoryCoordinator({
@@ -392,8 +410,8 @@ async function main() {
 
   // N — injected token count from the plugin's own counter in a fresh process.
   const nPrompt =
-    'Call the memory_status tool exactly once. Then report the line beginning "counters:" verbatim. ' +
-    'Do not call any other tool.'
+    'What is the maintenance window code for this project? You must call the memory_status tool exactly once, ' +
+    'then report the line beginning "counters:" verbatim before answering.'
   const nRun = runHeadless(nPrompt, patches.base, 180_000)
   const statusResult = nRun.toolResults.find((event) => /counters:|memory_status/i.test(String(event.result ?? '')))
   const countersLine = /counters:([^\n]*)/.exec(String(statusResult?.result ?? ''))?.[1]?.trim() ?? ''
@@ -473,13 +491,6 @@ async function main() {
   const reverseHits = await adapter.recall({ text: reverseToken, scopes: [evalScope], limit: 5 })
   leakageProbes.push(reverseHits.some((hit) => hit.record.text.includes(reverseToken)))
   const leaks = leakageProbes.filter(Boolean).length
-
-  // No-memory baseline: same five questions, plugin disabled, one process.
-  const baselinePrompt =
-    'Answer each question on its own line. If you do not know, answer UNKNOWN.\n' +
-    facts.map((fact, index) => `${index + 1}. ${fact.question}`).join('\n')
-  const baselineRun = runHeadless(baselinePrompt, patches.pluginOff, 180_000)
-  const baselineCorrect = facts.filter((fact) => baselineRun.final.includes(fact.token)).length
 
   // First-turn recall across A, B, D, E.
   const attempts = facts.length + 3
