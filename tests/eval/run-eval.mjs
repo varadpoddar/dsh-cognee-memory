@@ -387,6 +387,8 @@ async function main() {
   const kRun = runHeadless(otherFacts.question, patches.toolsOffOther, 180_000)
   const projectIsolated = !kRun.final.includes(otherFacts.token)
   const principalToken = `eval-principal-${RUN_ID}`
+  const principalA = `eval-principal-a-${RUN_ID}`
+  const principalBId = `eval-principal-b-${RUN_ID}`
   const coordinator = new MemoryCoordinator({
     adapter,
     config: CONFIG,
@@ -394,13 +396,13 @@ async function main() {
   })
   await coordinator.remember({
     text: `Principal A private note ${principalToken}.`,
-    identity: { principalId: 'eval-principal-a' },
+    identity: { principalId: principalA },
     scopeName: 'user',
     provenance: { kind: 'user_explicit', source: 'eval', recordedAt: stamp() },
   })
   const principalB = await coordinator.recall({
     text: principalToken,
-    identity: { principalId: 'eval-principal-b' },
+    identity: { principalId: principalBId },
     limit: 5,
   })
   const principalIsolated = !principalB.some((hit) => hit.record.text.includes(principalToken))
@@ -543,7 +545,7 @@ async function cleanup() {
   const owned = new Set([
     scopeKey(evalScope),
     scopeKey(otherScope),
-    scopeKey(makeScopeRef('user', 'eval-principal-a')),
+    scopeKey(makeScopeRef('user', `eval-principal-a-${RUN_ID}`)),
   ])
   const before = await datasets()
   const removed = []
