@@ -565,7 +565,7 @@ async function main() {
   report.notes.push(`duplicate probe: C prompt re-run twice, dataset records ${dupBefore} → ${dupAfter}; added=${dupAdded}`)
   report.notes.push(`baseline without memory final: ${baselineRun.final.replace(/\s+/g, ' ').slice(0, 500)}`)
   report.notes.push(`A/B/D/E first-turn successes: A ${aCorrect}/${facts.length} (prefetch-only), B ${bCorrect ? 1 : 0}/1 (prefetch-only, all tools off), D ${dCorrect ? 1 : 0}/1 (memory tools available: [${dRun.toolNames.join(', ')}]), E ${eCorrect ? 1 : 0}/1 (memory tools available: [${eRun.toolNames.join(', ')}])`)
-  report.notes.push('Prefetch-only recall of the maintenance fact was also probed and missed: the stable layer filled all 8 item slots with launch codes, so the query-specific maintenance hit was never injected. D/E therefore use the normal (tool-enabled) recall path; A/B prove prefetch-only works for high-salience facts.')
+  report.notes.push('Prefetch-only probe (manual, same scope, no tools) asked "What is the maintenance window for this project? Reply with the value only." and the model answered: "No maintenance window is recorded in this project\'s context — only launch codes ... and a write-to-retrievable probe are present." The record ranked first at the adapter level for that query, so the miss is in the plugin retrieval layers (stable layer can consume the 8-item budget), not in Cognee. D/E therefore use the normal tool-enabled recall path; A/B prove prefetch-only works for high-salience facts.')
 
   fs.writeFileSync(OUT, `${JSON.stringify(report, null, 2)}\n`)
   console.log(JSON.stringify({ done: true, out: OUT, scenarios: report.scenarios.map((s) => [s.id, s.status]), metrics: report.metrics }))
