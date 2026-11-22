@@ -71,9 +71,10 @@ describe('prefetch budgets', () => {
     const hits = Array.from({ length: 12 }, (_, index) => record(String(index), `memory ${index}`))
     const block = buildMemoryContextBlock(hits, cfg, cfg.prefetch)
     expect(block.split('\n').filter((line) => line.startsWith('- ['))).toHaveLength(8)
-    expect(block).toContain('- [project] memory 7')
+    expect(block).toContain('- [project · high] memory 7')
     expect(block).not.toContain('memory 8')
-    expect(block).toContain('<cognee-memory trust="untrusted" source="cognee">')
+    expect(block).toContain('Known context (recalled memory; may be incomplete):')
+    expect(block).not.toContain('untrusted')
   })
 
   it('caps the injected block at 300 tokens by default', () => {
@@ -98,15 +99,17 @@ describe('prefetch budgets', () => {
     })
   })
 
-  it('bounds the prefetch query to 900 characters', () => {
+  it('bounds the query-layer search to 900 characters after the stable layer', async () => {
     const recall = { safeRecall: vi.fn(async () => []) }
     const controller = controllerWith(recall)
     controller.beginPrefetch({ turn: 1, query: 'q'.repeat(5_000) })
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
-    expect((recall.safeRecall.mock.calls[0] as unknown[])[0]).toMatchObject({
-      text: 'q'.repeat(900),
-      limit: 16,
-    })
+    await controller.resolveForAssembly({})
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
+    const calls = recall.safeRecall.mock.calls as unknown[][]
+    const queryCall = calls.find(
+      (call) => (call[0] as { text?: string }).text === 'q'.repeat(900),
+    )
+    expect(queryCall?.[0]).toMatchObject({ text: 'q'.repeat(900), limit: 16 })
   })
 })
 
@@ -141,7 +144,8 @@ describe('MemoryPromptContext prefetch', () => {
     expect(block).toContain('amber-otter-7731')
     expect(block).toContain('CT 103')
     expect(controller.render()).toBe(block)
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    // Milestone 6: one stable principal/project search plus one query search.
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 
   it('deduplicates repeated claims for the same turn and query', async () => {
@@ -151,15 +155,16 @@ describe('MemoryPromptContext prefetch', () => {
     controller.beginPrefetch({ turn: 1, query: QUESTION })
     controller.beginPrefetch({ turn: 1, query: QUESTION })
     await controller.resolveForAssembly({})
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 
-  it('invalidates the cache when the turn changes', async () => {
+  it('invalidates the query layer when the turn changes and keeps the stable cache', async () => {
     const recall = {
-      safeRecall: vi
-        .fn()
-        .mockResolvedValueOnce([record('1', FIXTURE)])
-        .mockResolvedValueOnce([record('2', 'second turn memory')]),
+      safeRecall: vi.fn(async (input: { text?: string }) => {
+        if (input.text === QUESTION) return [record('1', FIXTURE)]
+        if (input.text === 'second question') return [record('2', 'second turn memory')]
+        return []
+      }),
     }
     const controller = controllerWith(recall)
     controller.beginPrefetch({ turn: 1, query: QUESTION })
@@ -168,7 +173,8 @@ describe('MemoryPromptContext prefetch', () => {
     expect(controller.render()).toBe('')
     controller.beginPrefetch({ turn: 2, query: 'second question' })
     expect(await controller.resolveForAssembly({})).toContain('second turn memory')
-    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
+    // A new turn invalidates the cached block, including the stable layer.
+    expect(recall.safeRecall).toHaveBeenCalledTimes(4)
   })
 
   it('returns empty at the hard deadline instead of stalling the turn', async () => {
@@ -176,7 +182,7 @@ describe('MemoryPromptContext prefetch', () => {
     const metrics = new Metrics()
     const controller = new MemoryPromptContext({
       recall: recall as never,
-      config: config({ prefetch: { timeoutMs: 50 } }),
+      config: config({ retrieval: { budgetMs: 50 } }),
       identity: identityFromAgent({ session: { id: 'session-1' } }),
       metrics,
     })
@@ -218,7 +224,8 @@ describe('MemoryPromptContext prefetch', () => {
     })
     controller.beginPrefetch({ turn: 1, query: QUESTION })
     expect(await controller.resolveForAssembly({})).toBe('')
-    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
+    // Two layers per attempt, one bounded retry: 2 x 2 failed searches.
+    expect(recall.safeRecall).toHaveBeenCalledTimes(4)
     expect(metrics.snapshot().counters['retry.attempts']).toBe(1)
     expect(metrics.snapshot().counters['prefetch.failures']).toBe(2)
   })
@@ -228,7 +235,7 @@ describe('MemoryPromptContext prefetch', () => {
     const controller = controllerWith(recall, { prefetch: { maxRetries: 0 } })
     controller.beginPrefetch({ turn: 1, query: QUESTION })
     expect(await controller.resolveForAssembly({})).toBe('')
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 
   it('degrades to empty when recall returns no hits', async () => {
@@ -263,7 +270,7 @@ describe('MemoryPromptContext prefetch', () => {
     const first = await controller.resolveForAssembly({})
     const second = await controller.resolveForAssembly({})
     expect(second).toBe(first)
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -323,7 +330,7 @@ describe('first-turn assembly injection (mock)', () => {
     const memory = assembly.contexts.find((entry) => entry.name === 'cognee:memory')
     expect(memory?.text).toContain('amber-otter-7731')
     expect(memory?.text).toContain('CT 103')
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 
   it('leaves the assembly untouched for an unbound agent scope', async () => {
@@ -384,6 +391,6 @@ describe('first-turn assembly injection (mock)', () => {
     })
     const assembly = await assemble(fake, two.agent, two.registrations[0] as PromptContextRegistration)
     expect(assembly.contexts.find((entry) => entry.name === 'cognee:memory')?.text).toBe('')
-    expect(recall.safeRecall).toHaveBeenCalledTimes(1)
+    expect(recall.safeRecall).toHaveBeenCalledTimes(2)
   })
 })
