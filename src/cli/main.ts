@@ -3,6 +3,8 @@
  * `memory` — operator CLI for the cognee-memory profile layer.
  *
  *   memory import-history [--dry-run|--apply] [--scope name:rawId] [--session <id>]
+ *   memory export --scope name:rawId --out bundle.jsonl
+ *   memory import --in bundle.jsonl --scope name:rawId [--apply]
  *   memory recall --scope name:rawId --query "<text>"
  *   memory remember --scope name:rawId --text "<fact>"
  *
@@ -10,6 +12,7 @@
  * an explicit `--apply`. Secrets are never printed: the CLI reads its token from
  * the configured environment variable and reports presence only.
  */
+import { importBundle, exportScope } from './bundle.js'
 import {
   applyHistoryImport,
   loadImportState,
@@ -84,11 +87,15 @@ const HELP = [
   '',
   'commands:',
   '  import-history   scan $DSH_HOME/sessions and ingest explicit facts (dry run by default)',
+  '  export           write one scope to a portable JSONL bundle',
+  '  import           import a bundle into one authorized scope (dry run by default)',
   '  recall           search one scope and print the records that come back',
   '  remember         write one explicit fact (operator seeding / round-trip proofs)',
   '',
   'flags: --scope <name:rawId> --apply --dry-run --json --principal <id>',
   '       import-history: --sessions-dir <dir> --state-file <path> --session <id> --limit-sessions N',
+  '       export: --out <path>',
+  '       import: --in <path> --allow-scope <name:rawId>[,<name:rawId>]',
   '       recall: --query <text> --limit N',
   '       remember: --text <fact>',
 ].join('\n')
@@ -187,6 +194,68 @@ async function runImportHistory(args: ParsedArgs, env: NodeJS.ProcessEnv, io: Cl
   return result.failed === 0 ? 0 : 1
 }
 
+async function runExport(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
+  const runtime = createCliRuntime(env)
+  const scope = parseScopeArg(args.values.scope, runtime.config, env)
+  const out = args.values.out
+  if (out === undefined || out.trim() === '') throw new MemoryError('VALIDATION', '--out is required')
+  const result = exportScope({ ledger: runtime.ledger, scope, outPath: out })
+  if (args.flags.has('json')) {
+    io.out(JSON.stringify({ ...result, scope: describeScope(scope) }))
+    return 0
+  }
+  io.out(`scope: ${describeScope(scope)}`)
+  io.out(`records: ${result.count}  wrote: ${result.path}`)
+  if (result.skippedSecrets > 0) io.err(`refused ${result.skippedSecrets} record(s) containing secrets`)
+  return 0
+}
+
+async function runImport(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
+  const runtime = createCliRuntime(env)
+  const scope = parseScopeArg(args.values.scope, runtime.config, env)
+  const input = args.values.in
+  if (input === undefined || input.trim() === '') throw new MemoryError('VALIDATION', '--in is required')
+  const principal = args.values.principal?.trim()
+  // Authorization is the deployment identity's writable set plus explicit
+  // operator grants. A bundle can never widen this: its own scope claims are
+  // provenance only, and the target scope is the one the caller names.
+  const resolved = await runtime.coordinator.resolveIdentity(
+    principal === undefined ? {} : { principalId: principal },
+  )
+  const granted = (args.values['allow-scope'] ?? '')
+    .split(',')
+    .map((raw) => raw.trim())
+    .filter((raw) => raw !== '')
+    .map((raw) => parseScopeArg(raw, runtime.config, env))
+  const permitted = [...allowedScopes(resolved, runtime.config), ...granted]
+  const identity = identityForScope(scope, {
+    ...(resolved.principalId === undefined ? {} : { principalId: resolved.principalId }),
+  })
+  const apply = args.flags.has('apply') && !args.flags.has('dry-run')
+  const result = await importBundle({
+    bundlePath: input,
+    ledger: runtime.ledger,
+    coordinator: runtime.coordinator,
+    identity,
+    scope,
+    allowedScopes: permitted,
+    apply,
+  })
+  if (args.flags.has('json')) {
+    io.out(JSON.stringify({ ...result, scope: describeScope(scope) }))
+    return 0
+  }
+  io.out(`scope: ${describeScope(scope)}  bundle: ${input}`)
+  io.out(
+    `${result.dryRun ? 'dry run' : 'applied'}: records ${result.records}  imported ${result.imported}  deduplicated ${result.deduplicated}  conflicts ${result.conflicts}  refused ${result.refused}`,
+  )
+  for (const outcome of result.outcomes.slice(0, 20)) {
+    io.out(`  - ${outcome.outcome} key=${outcome.semanticKey}${outcome.record === undefined ? '' : ` id=${outcome.record}`}`)
+  }
+  if (result.dryRun) io.out('dry run — pass --apply to write')
+  return 0
+}
+
 async function runRecall(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
   const runtime = createCliRuntime(env)
   const scope = parseScopeArg(args.values.scope, runtime.config, env)
@@ -255,6 +324,10 @@ export async function runCli(
     switch (args.command) {
       case 'import-history':
         return await runImportHistory(args, env, io)
+      case 'export':
+        return await runExport(args, env, io)
+      case 'import':
+        return await runImport(args, env, io)
       case 'recall':
         return await runRecall(args, env, io)
       case 'remember':

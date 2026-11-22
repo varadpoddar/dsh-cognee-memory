@@ -42,6 +42,22 @@ session events, and `ctx.webServer.register`.
   fails a memory write.
 
 
+### Added
+
+- **M14 portable export/import bundles.** `memory export --scope <ns>
+  --out bundle.jsonl` writes one `bundle` header plus one `record` line per
+  active durable memory with text, canonical semantic key, coarse confidence,
+  timestamps, provenance, and bounded source refs (session id + message index).
+  Records containing a credential are refused, so a bundle never carries a
+  secret. `memory import --in bundle.jsonl --scope <ns> [--allow-scope …]
+  [--apply]` is a dry run by default: it dedupes on the semantic key inside the
+  target scope (re-import adds 0 records), records a different fact under an
+  existing key as an append-only conflict annotation instead of overwriting the
+  memory, and authorizes the target against the deployment's writable scopes
+  plus explicit operator grants — a bundle's own scope claims are provenance
+  only, they can never widen where records land.
+
+
 ### Fixed
 
 - **Prefetch ranking: the stable layer could consume the whole item budget.**

@@ -133,6 +133,21 @@ resumable through a state file keyed by the extraction idempotency key and the
 source ref (session id + message index); candidates are applied in timestamp
 order so a later correction supersedes the earlier fact.
 
+Bundles move records between instances or applications:
+
+```bash
+memory export --scope project:<rawId> --out bundle.jsonl
+memory import --in bundle.jsonl --scope project:<rawId> [--allow-scope project:<rawId>] [--apply]
+```
+
+Export takes provenance, semantic keys, confidence, timestamps, and source refs;
+a record that still contains a credential is refused rather than exported.
+Import is a dry run unless `--apply` is passed, dedupes on the semantic key in
+the target scope (re-import reports 0 new records), and marks a different fact
+under an existing key as a conflict annotation instead of overwriting it. The
+target scope must be in the deployment's writable set or explicitly granted with
+`--allow-scope`; the scope a bundle claims is provenance only.
+
 ## Upgrade
 
 ```bash
