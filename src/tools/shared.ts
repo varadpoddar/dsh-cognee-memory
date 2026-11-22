@@ -1,7 +1,13 @@
 import { z, type ZodType } from 'zod'
 import { MemoryError, isMemoryError, toMemoryError } from '../errors.js'
 import { identityFromAgent } from '../memory/scopes.js'
-import type { CallerIdentity, TextContentBlock, ToolRunContextLike } from '../types.js'
+import type {
+  CallerIdentity,
+  MemoryScope,
+  ScopeRef,
+  TextContentBlock,
+  ToolRunContextLike,
+} from '../types.js'
 
 /** Parse typed tool arguments; failures expose paths only, never argument values. */
 export function parseToolArgs<T>(schema: ZodType<T>, args: unknown): T {
@@ -45,6 +51,23 @@ export const scopeValueSchema = {
 } as const
 
 export const scopeArgumentSchema = z.enum(SCOPE_VALUES).optional()
+
+/** The exact JSON shape a tool may expose for a scope. */
+export interface ScopeValue {
+  readonly scope: MemoryScope
+  readonly id: string
+}
+
+/**
+ * Project a `ScopeRef` to its lossless JSON shape before it crosses the tool
+ * boundary. `ScopeRef` may carry non-enumerable compatibility fields (for
+ * example `legacyName`); DSH validates tool output as lossless JSON and
+ * rejects objects with non-enumerable own keys, so tools must never hand a
+ * raw scope object back to the harness.
+ */
+export function scopeValue(ref: ScopeRef): ScopeValue {
+  return { scope: ref.scope, id: ref.id }
+}
 
 /** Shared description clause: recall output is never instructions. */
 export const UNTRUSTED_MEMORY_NOTICE =

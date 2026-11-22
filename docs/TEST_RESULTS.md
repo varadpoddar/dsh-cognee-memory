@@ -254,3 +254,50 @@ run identity, and evidence pointer.
 * `kill -9` crash injection on the real service. Recovery is covered by unit
   tests over a second outbox instance and an expired lease; not by killing the service.
 * Browser UI walk-through; all harness runs were headless/one-shot.
+
+## Regression: `memory_recall` returned `value is not lossless JSON` (0.2.1)
+
+Symptom on CT 103, harness 0.2.1-rc.5, plugin 0.2.0: `memory_status` and prefetch
+injection worked, every `memory_recall` call failed with
+`Error: tool "memory_recall" returned invalid output: value is not lossless JSON`
+(reproduced three times in one headless turn, and once more directly:
+`dsh headless "call memory_recall for project scope and show raw output"`).
+
+Diagnosis: the installed build was instrumented with a walker that mirrors DSH's
+`isJsonValue` rules and records the first offending path. The tool value itself was
+fine except for one path per hit:
+
+```json
+{"diagnostics":["value.memories[0].scope.legacyName:nonenum",
+                 "value.memories[1].scope.legacyName:nonenum",
+                 "value.memories[2].scope.legacyName:nonenum"]}
+```
+
+`makeScopeRef` (`src/memory/scopes.ts`) keeps the M1 dataset name on the scope as a
+**non-enumerable** own property (`Object.defineProperty(ref, 'legacyName', { enumerable: false })`).
+The tools copied `hit.record.scope` / `result.scope` straight into their output.
+`JSON.stringify` drops non-enumerable keys, so DSH's lossless check (which requires
+every own key to be an enumerable string key) rejects the value even though the
+wire text looks correct. `memory_remember` and `memory_forget` had the same defect;
+only recall was exercised because it is the read path.
+
+Fix: `scopeValue()` in `src/tools/shared.ts` projects a scope to `{scope, id}`;
+`memory_recall`, `memory_remember` and `memory_forget` now use it. No DSH core change.
+
+Evidence after rebuild + reinstall into both profiles + `systemctl restart deepseek-harness`:
+
+```text
+# installed value checked against the host's own validator (node on CT 103)
+{"value":{"count":1,"memories":[{"id":"mem-1","text":"release codename is amber-otter-7731",
+  "scope":{"scope":"project","id":"workspace-demo-project-68dc569cd61ed69d8968"}, …}],
+  "dshIsJsonValue":true,"ownKeys":["scope","id"]}
+
+# live harness, new process
+- [project] Deployment decisions confirmed: deployment target is CT 103; …
+- [project] ADR-9001: e2e test decision 20261122T003615Z
+- [project] The release codename is amber-otter-7731 and the deployment target is CT 103.
+```
+
+Regression test: `test/tools-lossless-output.test.ts` (5 tests) mirrors the DSH
+walker (`test/helpers/lossless-json.ts`) and asserts all three tool values are
+lossless, JSON-round-trip stable, and expose exactly `{scope, id}`.

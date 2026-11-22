@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1 — 2026-11-22
+
+### Fixed
+
+- **`memory_recall` rejected by the host with `value is not lossless JSON`.**
+  `ScopeRef` carries `legacyName` as a *non-enumerable* own property; `RecallHit`
+  scopes were copied straight into the tool value, and DSH's output validator
+  rejects any object with a non-enumerable own key (JSON would silently drop it).
+  `memory_remember` and `memory_forget` had the same latent defect but were not
+  exercised. All three tools now project scopes through `scopeValue()`
+  (`src/tools/shared.ts`), so the boundary always sees `{scope, id}`.
+  Regression: `test/tools-lossless-output.test.ts` (5 tests, mirrors the DSH walker).
+
 ## 0.2.0 — 2026-11-22
 
 UI surface, provenance, and publish readiness. No DSH core patch; the plugin

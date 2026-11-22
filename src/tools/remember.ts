@@ -8,6 +8,7 @@ import {
   SCOPE_VALUES,
   parseToolArgs,
   rethrowToolError,
+  scopeValue,
   scopeValueSchema,
   textBlock,
   toolIdentity,
@@ -99,7 +100,7 @@ export function createRememberTool(deps: RememberToolDependencies): ToolDefiniti
         return {
           stored: true,
           id: result.id,
-          scope: result.scope,
+          scope: scopeValue(result.scope),
           deduplicated: result.deduplicated,
         }
       } catch (error) {

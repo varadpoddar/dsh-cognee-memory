@@ -7,6 +7,7 @@ import {
   SCOPE_VALUES,
   parseToolArgs,
   rethrowToolError,
+  scopeValue,
   scopeValueSchema,
   textBlock,
   toolIdentity,
@@ -67,12 +68,13 @@ export function createForgetTool(deps: ForgetToolDependencies): ToolDefinitionLi
     async execute(rawArgs: unknown, exec: ToolRunContextLike): Promise<ForgetResult> {
       try {
         const args = parseToolArgs(argsSchema, rawArgs)
-        return await deps.coordinator.forget({
+        const result = await deps.coordinator.forget({
           id: args.id,
           identity: toolIdentity(exec),
           ...(args.scope === undefined ? {} : { scopeName: args.scope }),
           signal: exec.signal,
         })
+        return { ...result, scope: scopeValue(result.scope) } as ForgetResult
       } catch (error) {
         rethrowToolError(error)
       }

@@ -11,6 +11,7 @@ import {
   UNTRUSTED_MEMORY_NOTICE,
   parseToolArgs,
   rethrowToolError,
+  scopeValue,
   scopeValueSchema,
   textBlock,
   toolIdentity,
@@ -48,7 +49,7 @@ function toValue(hits: readonly RecallHit[]): RecallToolValue {
     memories: hits.map((hit) => ({
       id: hit.record.id,
       text: hit.record.text,
-      scope: hit.record.scope,
+      scope: scopeValue(hit.record.scope),
       createdAt: hit.record.createdAt,
       score: hit.score,
       ...(hit.record.tags === undefined ? {} : { tags: hit.record.tags }),
