@@ -105,7 +105,7 @@ function metricRows() {
   const write = metrics.writeToRetrievableMs
   if (write) rows.push(['Write-to-retrievable latency p50 / p95', `${ms(write.p50)} / ${ms(write.p95)}`, `n=${write.n}, max ${ms(write.max)}`])
   const dupes = metrics.duplicateRate
-  if (dupes) rows.push(['Duplicate rate', `${percent(dupes.rate)}`, `${dupes.duplicates} extra record(s) for ${dupes.writes} identical harness writes`])
+  if (dupes) rows.push(['Duplicate rate', `${percent(dupes.rate)}`, `${dupes.duplicates} extra record(s) for ${dupes.writes} re-runs${dupes.basis === undefined ? '' : ` (${dupes.basis})`}`])
   const leak = metrics.crossScopeLeakage
   if (leak) rows.push(['Cross-scope leakage rate', `${percent(leak.rate)}`, `${leak.leaks} leak(s) in ${leak.probes} probes`])
   const tokens = metrics.injectedTokenOverhead
@@ -136,7 +136,7 @@ lines.push('## Method')
 lines.push('')
 lines.push('- Every scenario ran against the live deployment (Cognee `1.6.10-local`, EBAC on) with the shipped plugin; no mocks.')
 lines.push('- Each recall question ran in a **fresh `dsh headless` process** with a `--patch` overlay that isolates the project scope; wall-clock milliseconds include process start and model time.')
-lines.push("- Adapter-level latency used the plugin's own `CogneeRestAdapter` (n=20 queries) and its write/ingestion gate, not a synthetic HTTP client.")
+lines.push("- Adapter-level latency used the plugin's own `CogneeRestAdapter` (20 attempted, 19 successful queries) and its write/ingestion gate, not a synthetic HTTP client.")
 lines.push('- The no-memory baseline ran FIRST, before the codewords existed, with the plugin disabled (`enabled: false`) and every tool off; the same five questions were asked in one process and the planted codes counted.')
 lines.push('- Scenarios that change deployment state (service restart, container restart) are named in their evidence and leave the deployment restored.')
 lines.push('- A scenario is `BLOCKED` only when the environment cannot produce the condition; `SKIP` is an explicit deferral.')
