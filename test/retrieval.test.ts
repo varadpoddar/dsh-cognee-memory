@@ -114,6 +114,34 @@ describe('RetrievalCoordinator', () => {
     expect(outcome.block).not.toMatch(/x{1201,}/)
   })
 
+  it('reserves item capacity for the query layer so stable context cannot crowd out a matching fact', async () => {
+    // Scenario-D crowd-out, as recorded in docs/EVALUATION.md: the adapter
+    // ranked the maintenance fact first for the real question, but eight
+    // high-scoring stable items filled every item slot, so the query layer got
+    // max(0, 8 - 8) = 0 slots and the fact never reached the injected block.
+    const stableHits = Array.from({ length: 8 }, (_, index) =>
+      hit(`s${index}`, `stable filler ${index}`, 0.95),
+    )
+    const queryHits = [
+      hit('maintenance', 'The maintenance window for this project is 03:00-04:00 UTC', 0.99),
+      ...Array.from({ length: 7 }, (_, index) => hit(`q${index}`, `query filler ${index}`, 0.9)),
+    ]
+    const safeRecall = vi.fn(async (input: { text: string }) =>
+      input.text === QUESTION ? queryHits : stableHits,
+    )
+    const { coordinator: retrieval, cfg } = coordinator(safeRecall)
+    const outcome = await retrieval.retrieve({ query: QUESTION, turn: 1 })
+    const lines = outcome.block.split('\n').filter((line) => line.startsWith('- '))
+    expect(outcome.block).toContain('maintenance window for this project is 03:00-04:00 UTC')
+    expect(outcome.queryHits).toBeGreaterThanOrEqual(1)
+    expect(lines.length).toBeLessThanOrEqual(cfg.retrieval.maxItems)
+    // the stable layer keeps its own 300-token cap and can no longer take every slot
+    expect(lines.filter((line) => line.includes('stable filler')).length).toBeLessThanOrEqual(4)
+    expect(outcome.tokens).toBeLessThanOrEqual(
+      cfg.retrieval.stableTokens + cfg.retrieval.queryTokens,
+    )
+  })
+
   it('keeps at most 8 items, stable layer first', async () => {
     const safeRecall = vi.fn(async (input: { text: string }) =>
       input.text === QUESTION

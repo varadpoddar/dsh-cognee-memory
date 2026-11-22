@@ -29,6 +29,13 @@ import {
  * (`stableTokens + queryTokens`). Only scopes authorized for the caller are
  * searched because every read goes through `RecallService.safeRecall`.
  * Superseded / expired / revoked records are dropped before ranking.
+ *
+ * The item cap is split, not first-come: the query layer keeps a reserved floor
+ * of `ceil(maxItems / 2)` slots, so a full stable layer can never consume the
+ * budget a question-matching fact needs (the Milestone 11 scenario-D
+ * crowd-out). Unused reservation flows back to the stable layer, and leftover
+ * stable candidates backfill slots the query layer did not need; every layer
+ * still respects its own token cap.
  */
 export interface RetrievalDependencies {
   readonly recall: Pick<RecallService, 'safeRecall'>
@@ -70,11 +77,15 @@ function sortHits(hits: readonly RecallHit[]): RecallHit[] {
   })
 }
 
+function recordKey(hit: RecallHit): string {
+  return `${hit.record.scope.scope}\u0000${hit.record.scope.id}\u0000${hit.record.id}`
+}
+
 function dedupe(hits: readonly RecallHit[]): RecallHit[] {
   const seen = new Set<string>()
   const unique: RecallHit[] = []
   for (const hit of sortHits(hits)) {
-    const key = `${hit.record.scope.scope}\u0000${hit.record.scope.id}\u0000${hit.record.id}`
+    const key = recordKey(hit)
     if (seen.has(key)) continue
     seen.add(key)
     unique.push(hit)
@@ -196,28 +207,42 @@ export class RetrievalCoordinator {
       queryHits = layer.hits
     }
 
+    const stableCandidates = dedupe(stableHits)
+    const queryCandidates = dedupe(queryHits)
+
+    // Query layer first: reserve half the item budget (one slot per query
+    // candidate, up to that floor) so a full stable layer cannot crowd out a
+    // question-matching fact.
+    const queryFloor = Math.max(1, Math.ceil(budget.maxItems / 2))
+    const reserved = Math.min(queryCandidates.length, queryFloor)
     const stable = takeWithin(
-      dedupe(stableHits),
+      stableCandidates,
       budget.stableTokens,
-      budget.maxItems,
+      Math.max(0, budget.maxItems - reserved),
     )
-    const queryOnly = dedupe(queryHits).filter(
-      (hit) =>
-        !stable.hits.some(
-          (chosen) =>
-            chosen.record.id === hit.record.id &&
-            chosen.record.scope.scope === hit.record.scope.scope &&
-            chosen.record.scope.id === hit.record.scope.id,
-        ),
-    )
+
+    const chosenKeys = new Set(stable.hits.map(recordKey))
     const specific = takeWithin(
-      queryOnly,
+      queryCandidates.filter((hit) => !chosenKeys.has(recordKey(hit))),
       budget.queryTokens,
       Math.max(0, budget.maxItems - stable.hits.length),
     )
-    const selected = [...stable.hits, ...specific.hits]
-    this.verification?.record(selected)
-    const block = formatMemoryBlock(selected, {
+    for (const hit of specific.hits) chosenKeys.add(recordKey(hit))
+
+    // Slots the query layer did not need flow back to remaining stable
+    // candidates, still inside the stable layer's own token cap.
+    const backfill = takeWithin(
+      stableCandidates.filter((hit) => !chosenKeys.has(recordKey(hit))),
+      Math.max(0, budget.stableTokens - stable.tokens),
+      Math.max(0, budget.maxItems - stable.hits.length - specific.hits.length),
+    )
+    for (const hit of backfill.hits) chosenKeys.add(recordKey(hit))
+
+    // Stable context is presented first, then question-specific hits; the
+    // strict combined cap is enforced again by the formatter.
+    const chosen = [...stable.hits, ...backfill.hits, ...specific.hits]
+    this.verification?.record(chosen)
+    const block = formatMemoryBlock(chosen, {
       maxTokens: combinedCap,
       maxItems: budget.maxItems,
     })
@@ -232,12 +257,12 @@ export class RetrievalCoordinator {
     if (request.turn === 1) {
       // Hit rate is about the turn's injected block, not one layer: the stable
       // principal/project layer legitimately answers some first turns alone.
-      this.metrics?.increment(selected.length > 0 ? 'recall.firstTurnHits' : 'recall.firstTurnMisses')
+      this.metrics?.increment(chosen.length > 0 ? 'recall.firstTurnHits' : 'recall.firstTurnMisses')
     }
 
     return {
       block: block.text,
-      hits: selected,
+      hits: chosen,
       queryHits: specific.hits.length,
       tokens: block.tokens,
       elapsedMs,
