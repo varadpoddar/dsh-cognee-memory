@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.0.0 — 2026-11-22
+
+First stable release. No DSH core patch; the plugin still mounts through one
+profile row and uses only `ctx.tools.register`, `ctx.systemPrompt.*`, agent and
+session events, and `ctx.webServer.register`.
+
+### Fixed
+
+- **Prefetch ranking: the stable layer could consume the whole item budget.**
+  Milestone 11 scenario D missed a maintenance fact in a tools-disabled
+  prefetch: the stable 300-token layer filled all 8 item slots, so the query
+  layer received `max(0, 8 - stable)` = 0 slots. The coordinator now reserves
+  `ceil(maxItems / 2)` slots for the query layer, flows unused reservation back
+  to stable, and backfills leftover slots from stable candidates. Per-layer
+  token caps (300 / 900), the combined 1200-token cap, the 8-item cap and the
+  1500 ms deadline are unchanged. Regression:
+  `test/retrieval.test.ts` “reserves item capacity…” (fails on the old code).
+- **Cognee CHUNKS scores were ranked backwards.** `/search` with `CHUNKS`
+  returns ascending vector *distance* in `score` (exact match 0.0486, unrelated
+  0.39–0.49) while `RecallService` sorts descending, so the least relevant
+  memory was ranked first. The REST adapter now converts CHUNKS distance to
+  similarity (`1 - distance`) at the boundary; other search types are
+  unchanged. Regression: `test/cognee-rest.test.ts` “converts CHUNKS distance
+  scores…”.
+
+### Added
+
+- Release metadata: `1.0.0`, complete `files`/`exports`, `engines.node >=22`,
+  DSH peer dependencies, repository/homepage/bugs, MIT license, keywords,
+  `sideEffects: false`.
+- [`README.md`](README.md) rewritten as an operator-facing release README
+  (install, configure, upgrade, rollback, uninstall, security, architecture,
+  troubleshooting).
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — exact CT 103 commands, service
+  account, env files, restart requirement, verification, smoke procedure.
+- [`ROLLBACK.md`](ROLLBACK.md) — stop → remove → restore profile → restart.
+- [`docs/PR.md`](docs/PR.md) — prepared pull-request description (not pushed).
+- Fresh-install smoke test: `npm pack` → install the tarball into a clean
+  throwaway `DSH_HOME` on CT 103 → confirm the plugin mounts, tools register,
+  the settings page answers, and a tools-off first turn recalls a fixture.
+
+### Milestones
+
+| # | Milestone | Outcome |
+| --- | --- | --- |
+| 1 | First-turn retrieval | Bounded `Known context:` block from the real first message |
+| 2 | Stable identity and scopes | session / agent / project / team / global datasets, deny-by-default policy |
+| 3 | Automatic extraction | Explicit user facts become durable memory without a tool call |
+| 4 | Durable write path | Candidate queue + outbox survive process exit; exact/near dedup |
+| 5 | Resilience and metrics | Timeouts, `failureMode: open` degradation, bounded counters |
+| 6 | Two-layer retrieval coordinator | Stable + query layer, shared deadline, strict token/item caps |
+| 7 | Tool surface | remember/recall/forget/status, lossless JSON output, write policy |
+| 8 | Security hardening | Credential redaction, injection-neutralized prompt block, scope isolation |
+| 9 | Settings page | Authenticated runtime Cognee address, precedence and hot reload |
+| 10 | Provenance | Per-memory provenance index, JSON/HTML routes, sidebar panel |
+| 11 | Evaluation | Live narrow-slice scenarios A–F, K, N, O with measured numbers |
+| 12 | Release 1.0.0 | Ranking fix, packaging, docs, fresh-install smoke, PR description |
+
+### Verification
+
+- `npm ci && npm run build && npm test` from a clean checkout of the packed
+  tarball: **45 test files, 455 tests passed**.
+- CT 103 smoke: tarball installed into a clean `DSH_HOME`, plugin mounted, all
+  four memory tools registered, settings page `200` with the operator token,
+  and a tools-disabled first response recalled the maintenance fixture.
+
 ## 0.2.1 — 2026-11-22
 
 ### Fixed

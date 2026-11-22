@@ -1,7 +1,7 @@
 {
   "name": "dsh-cognee-memory",
-  "version": "0.2.1",
-  "description": "Persistent Cognee-backed memory for DeepSeek Harness agents: bounded known-context recall, memory/remember/forget/status tools, a memory-provenance side panel, and an authenticated settings page.",
+  "version": "1.0.0",
+  "description": "Persistent Cognee-backed memory for DeepSeek Harness agents: bounded known-context recall with reserved query capacity, memory/remember/forget/status tools, a memory-provenance side panel, and an authenticated settings page.",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
@@ -12,6 +12,8 @@
     "cordis",
     "plugin",
     "memory",
+    "persistent-memory",
+    "agent-memory",
     "cognee",
     "knowledge-graph",
     "rag",
@@ -30,17 +32,17 @@
     "lib",
     "src",
     "scripts",
-    "test",
     "docs/ARCHITECTURE.md",
     "docs/UI_INTEGRATION.md",
     "docs/SETTINGS.md",
-    "tsconfig.json",
-    "tsconfig.build.json",
-    "vitest.config.ts",
-    "vitest.live.config.ts",
+    "docs/DEPLOYMENT.md",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "ROLLBACK.md",
+    "LICENSE",
+    "tsconfig.json",
+    "tsconfig.build.json",
+    "vitest.config.ts"
   ],
   "engines": {
     "node": ">=22",
@@ -93,5 +95,15 @@
     "test:watch": "vitest",
     "test:live": "vitest run --config vitest.live.config.ts",
     "prepack": "npm run build && npm run check:client"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepseek-harness/dsh-cognee-memory.git"
+  },
+  "homepage": "https://github.com/deepseek-harness/dsh-cognee-memory#readme",
+  "bugs": {
+    "url": "https://github.com/deepseek-harness/dsh-cognee-memory/issues"
+  },
+  "author": "DeepSeek Harness contributors",
+  "sideEffects": false
 }

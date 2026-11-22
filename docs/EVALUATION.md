@@ -203,3 +203,89 @@ pct exec 106 -- docker restart cognee
 - A/B/D/E first-turn successes: A 5/5 (prefetch-only), B 1/1 (prefetch-only, all tools off), D 1/1 (memory tools only: memory_recall x4), E 1/1 (prefetch-only, all tools off)
 - Prefetch-only probe (manual, same scope, no tools) asked "What is the maintenance window for this project? Reply with the value only." and the model answered: "No maintenance window is recorded in this project's context — only launch codes ... and a write-to-retrievable probe are present." The record ranked first at the adapter level for that query, so the miss is in the plugin retrieval layers (stable layer can consume the 8-item budget), not in Cognee. D therefore used only memory tools (four memory_recall calls); E used prefetch-only recall of the amber fact to isolate restart persistence from this retrieval miss.
 - Write-to-retrievable: the C explicit fact was searchable 949 ms after the turn exited (extraction runs before the model answer, so most ingestion time is inside the turn). The separate adapter-level probe (3 writes, add+cognify) measured p50 8451 ms / p95 8931 ms end-to-end.
+
+---
+
+# 1.0.0 ranking fix — scenario D, prefetch-only before/after
+
+The Milestone 11 miss above had two causes, both fixed for 1.0.0. This section
+reproduces the crowd-out in a fresh project scope (`dsh/eval/m12-ranking`, 21
+memory records: 20 durable-context items + one maintenance fact seeded through
+the harness with all tools off) and re-runs the same tools-disabled first turn.
+
+## Setup and commands
+
+```text
+# seed dense durable context through the adapter (scope dsh/eval/m12-ranking)
+PLUGIN_LIB=<profile>/lib node /tmp/m12-rank/seed.mjs        # 12 conventions/decisions
+PLUGIN_LIB=<profile>/lib node /tmp/m12-rank/seed2.mjs       # 8 "durable context" items
+
+# prefetch-only probe, every tool disabled, fresh process
+su dsh -s /bin/bash -c 'set -a; . /etc/dsh/cognee.env; . /etc/dsh/llm.env; set +a; \
+  DSH_HOME=/var/lib/deepseek-harness/.dsh timeout 130 \
+  dsh --profile headless --patch /tmp/m12-rank/patch-no-tools.yml --json \
+  "What is the maintenance window for this project? Reply with the value only."'
+```
+
+`patch-no-tools.yml` disables `cognee-memory.tools` plus bash/fs/jobs/web/todo/
+subagent/workflow/plugin-manager, so a correct answer can only come from the
+prefetch block.
+
+Adapter ordering for the probe (Cognee CHUNKS, raw distance):
+
+```text
+stable layer: 8 durable-context rows at 0.19–0.28; maintenance fact at 0.4717 (outside top 8)
+query layer : maintenance fact 0.0486 (rank 1), unrelated rows 0.4194+
+```
+
+## Before (0.2.1 / HEAD 8fe4e28)
+
+Injected block: 8 items, 269 tokens, **0 query hits** — the stable layer took
+every slot. Final answer:
+
+```text
+final: Not defined — no maintenance window is specified anywhere in this project's context
+       (conventions, decisions, and ongoing work make no mention of one).
+```
+
+The model called no memory tool (only DSH's internal `exit_plan_mode`, which is
+not a memory tool). The same miss was recorded in Milestone 11.
+
+## After (1.0.0)
+
+The coordinator reserves `ceil(8/2)=4` query slots and the adapter converts
+CHUNKS distance to similarity, so the top query hit survives. Injected block:
+**8 items, 284 tokens, 4 query hits, 415 ms** (`TOKENS=284 QUERYHITS=4 ITEMS=8
+ELAPSED=415`), maintenance fact is the first query-layer line:
+
+```text
+Known context:
+- Durable context: project decisions are recorded as durable project memory. · project · 2026-11-22
+- Ongoing project work: durable decisions and conventions from prior outcomes. · project · 2026-11-22
+- Project convention: durable decisions, preferences, and prior outcomes live in project scope. · project · 2026-11-22
+- Prior outcome and decision: durable project context survives restarts. · project · 2026-11-22
+- the maintenance window for this project is m12-rank-window-0300-0400. Reply DONE · project · 2026-11-22
+- Decision: deployments for this project go to CT 103 and are restarted with systemctl. · project · 2026-11-22
+- Convention: this project uses pnpm workspaces and Node 22. · project · 2026-11-22
+- Preference: durable decisions are recorded as single-sentence project memory. · project · 2026-11-22
+```
+
+Final answer, first response, zero memory tool calls:
+
+```text
+final: m12-rank-window-0300-0400
+```
+
+Budgets stayed strict: stable layer 4 items ≤ 300 tokens, query layer 4 items ≤
+900 tokens, combined 284 ≤ 1200, 8 items, 415 ms ≤ 1500 ms.
+
+## Regressions
+
+- `test/retrieval.test.ts` — "reserves item capacity for the query layer …":
+  fails on the previous coordinator (query got 0 slots), passes now.
+- `test/cognee-rest.test.ts` — "converts CHUNKS distance scores to similarity
+  and keeps the closest first": observed live distances 0.0486 vs 0.46.
+
+Fixtures were not touched: `3d8d8ad8-41be-59c3-9310-7915c783e5ef` and
+`amber-otter-7731` remain read-only; all new data lives in the synthetic
+`dsh/eval/m12-ranking` scope.
