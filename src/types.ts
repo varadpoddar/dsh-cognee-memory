@@ -193,6 +193,18 @@ export interface PluginContextLike {
    * still applies with tools and prompt context when no web server exists.
    */
   readonly webServer?: WebServerLike
+  /**
+   * Cordis's inject-free service lookup (`ctx.get(name)`). Reading an
+   * un-injected service through the context proxy throws, so optional services
+   * must be resolved through this method instead of property access.
+   */
+  get?(name: string): unknown
+  /**
+   * Cordis's nested dependency activation (`ctx.inject(deps, callback)`). The
+   * callback runs only while every named service is available, which is how an
+   * optional service is consumed without making the whole plugin depend on it.
+   */
+  inject?(deps: readonly string[], callback: (ctx: PluginContextLike) => void): unknown
   on(name: string, listener: (...args: never[]) => unknown): () => unknown
   effect?(execute: () => (() => void) | void): () => unknown
   logger?(name: string): PluginLoggerLike

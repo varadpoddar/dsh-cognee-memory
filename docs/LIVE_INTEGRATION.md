@@ -329,3 +329,209 @@ Same prompt, `scopeDefaults.projectId: dsh/project/e2e-other` supplied through a
   scope is not stored server-side (Cognee has no description field for datasets).
 * One pre-existing dataset `dsh/agent/smoke` belongs to earlier work and was left alone;
   the probe dataset created during reconnaissance was deleted.
+
+## 7. Ship + live verification of the settings build (2026-11-21 19:38–19:52 PST)
+
+### 7.1 Install fix (pnpm store major mismatch)
+
+`dsh plugin --profile web add …` failed with only `Command failed with exit code 1: pnpm add …`.
+Running pnpm directly in the profile exposed the cause:
+
+```
+Error: ERR_PNPM_UNEXPECTED_STORE
+  × adding a new package
+  ╰─▶ Unexpected store location
+        The dependencies at ".../profiles/web/node_modules" are currently linked from
+        the store at "/root/.local/share/pnpm/store/v10".
+        pnpm now wants to use the store at "/root/.local/share/pnpm/store/v11"
+```
+
+The profile was installed by pnpm 10.34.9; the host now runs pnpm 12.21.0
+(`.modules.yaml`: `packageManager: pnpm@10.34.9`, `storeDir: …/store/v10`).
+
+Fix used (backup first, `cp -a` per profile — 8.3 MB each, so `node_modules` was included):
+
+```bash
+cp -a /root/.dsh/profiles/web      /root/profiles-web.bak-1795318767
+cp -a /root/.dsh/profiles/headless /root/profiles-headless.bak-1795318767
+rm -rf /root/.dsh/profiles/{web,headless}/node_modules \
+       /root/.dsh/profiles/{web,headless}/pnpm-lock.yaml
+dsh plugin --profile web      add /root/dsh-cognee-memory-0.1.0.tgz
+dsh plugin --profile headless add /root/dsh-cognee-memory-0.1.0.tgz
+# .modules.yaml now: packageManager pnpm@12.21.0, storeDir …/store/v11
+```
+
+**The live service does not use `/root/.dsh`.** The unit sets
+`User=dsh`, `HOME=/var/lib/deepseek-harness`, `DSH_HOME=/var/lib/deepseek-harness/.dsh`,
+so its `web` profile previously had **no plugin dependency and no cognee config entry**.
+That profile was installed and configured separately:
+
+```bash
+install -d -o dsh -g dsh -m 700 /var/lib/dsh-pnpm   # dsh cannot write its own HOME
+runuser -u dsh -- env HOME=/var/lib/dsh-pnpm DSH_HOME=/var/lib/deepseek-harness/.dsh \
+  dsh plugin --profile web add /var/lib/deepseek-harness/dsh-cognee-memory-0.1.0.tgz
+```
+
+(`HOME=/var/lib/deepseek-harness` is root-owned, so corepack could not create
+`~/.cache/node/corepack`; a dedicated install home avoids changing service permissions.)
+
+### 7.2 Two defects found and fixed in this build
+
+1. **Plugin did not activate in any profile.** `apply()` probed `ctx.webServer !== undefined`.
+   Cordis throws on reading a service not named in `inject`:
+   `Error: cannot get property "webServer" without inject` → `dsh: warning: 1 entry did not
+   activate`. Fixed by mounting the routes inside `ctx.inject(['webServer'], webCtx => …)`
+   (the idiom used by `dsh-api-gateway`/`dsh-api-remote-access`), keeping a guarded
+   property-read fallback for plain test doubles. All 243 unit tests pass.
+2. **503 response rendered `<h1>403</h1>`.** The status line was already correct; the body
+   now uses `auth.status` (`<h1>503</h1>`).
+
+Final artifact: `dsh-cognee-memory-0.1.0.tgz`, sha256
+`f2ebb4fbb317710a5328993d65765ceb1bc8223956b3e2c81386c79ee91e6dc2`, installed in
+`/root/.dsh/profiles/{web,headless}` and
+`/var/lib/deepseek-harness/.dsh/profiles/{web,headless}` (all four show the `ctx.inject`
+build). `deepseek-harness.service`: `active`, zero `error|warning|did not activate` lines
+in the journal since start.
+
+### 7.3 Tools live (`--dump-config` + real call)
+
+```
+$ dsh --profile web --dump-config | grep -A8 cognee
+- id: cognee-memory
+  name: dsh-cognee-memory
+  config:
+    enabled: true
+    transport: rest
+    apiBaseUrl: http://10.20.10.15:8000/api/v1
+    authMode: api-key
+    apiTokenEnv: COGNEE_API_KEY
+    failureMode: open
+```
+
+Real headless turn (`dsh --profile headless "Call the memory_status tool …"`):
+
+```
+- enabled: true
+- transport: rest
+- reachable: true
+- endpoint: http://10.20.10.15:8000/api/v1
+- auth: api-key
+- failure mode: open
+- counters: recall.requests=1, prompt.refresh=1
+```
+
+`prompt.refresh=1` is the `agent/pre-step` recall hook firing.
+
+### 7.4 Settings page
+
+Token lives only in `/etc/dsh/cognee.env` (0600, `COGNEE_MEMORY_SETTINGS_TOKEN`), read by
+the existing `EnvironmentFile=-/etc/dsh/cognee.env` drop-in. Commands use `<token>`.
+
+| Request | Result |
+| --- | --- |
+| `GET /plugins/cognee-memory/settings` (no token) | **401** |
+| `GET …?token=wrong` | **401** |
+| `GET …?token=<token>` | **200**, `<title>Cognee memory settings`, `name="apiBaseUrl"`, `Source: profile` |
+| `GET …/settings.json` with `Authorization: Bearer <token>` | **200**, `"endpoint":"http://10.20.10.15:8000/api/v1"`, `"sources":{"apiBaseUrl":"profile"}` |
+| `GET` via Traefik CT 104 → `10.20.10.12:3080`, token | **200** |
+| `GET https://dsh.nomad.opsc.io/plugins/cognee-memory/settings?token=<token>` | **200** |
+| same public URL, no token / wrong token | **401 / 401** |
+| direct handler with `env: {}` (token unset), in-process | **503**, body `<h1>503</h1><p>Settings are disabled: set COGNEE_MEMORY_SETTINGS_TOKEN…` |
+
+The Proxmox host itself gets `000` to `10.20.10.12:3080` — nftables admits only CT 104
+(`10.20.10.13`), as designed; the proxy path is the LAN proof.
+
+### 7.5 Hot retarget (no restart)
+
+Form POST (`application/x-www-form-urlencoded`, field `apiBaseUrl`) to
+`…/settings?token=<token>`:
+
+```
+PID_BEFORE=60092  ACTIVE_ENTER_BEFORE=Sat 2026-11-21 19:41:16 PST
+POST http://10.20.10.15:9999/api/v1 => 303
+settings.json: "endpoint":"http://10.20.10.15:9999/api/v1", "sources":{"apiBaseUrl":"stored"}
+memory_status: endpoint http://10.20.10.15:9999/api/v1 / reachable false
+POST http://10.20.10.15:8000/api/v1 => 303
+settings.json: "endpoint":"http://10.20.10.15:8000/api/v1"
+memory_status: endpoint http://10.20.10.15:8000/api/v1 / reachable true
+PID_AFTER=60092   ACTIVE_ENTER_AFTER=Sat 2026-11-21 19:41:16 PST
+```
+
+Same PID and start timestamp throughout: the stored setting is re-read per call.
+
+### 7.6 Cross-conversation memory — measured behaviour
+
+Two separate `dsh --profile headless` processes (different sessions), same project scope
+`scopeDefaults.projectId: dsh/project/e2e` → dataset
+`dsh_cognee_project_project-4be96e7c2cdbb95a1ac9`.
+
+**No automatic write hook exists.** `registerAgentLifecycle` wires `agent/created`,
+`agent/pre-step`, `agent/disposed` for recall only. `TaskLifecycleRecorder.record()` is the
+only ingestion path besides the `memory_remember` tool, and it is exported but never
+registered. Control run:
+
+```
+$ dsh … "Do not call any tools. Durable fact for later: the release codename is
+         amber-otter-7731 … Reply with just OK."
+{"type":"final","text":"OK"}          # zero tool_call events
+```
+
+Nothing was written; the fact never reached Cognee. In an otherwise identical run where
+tools were allowed, the **model** chose the tool:
+
+```
+{"type":"tool_call","tool":"memory_remember","input":{"text":"Deployment decisions
+ confirmed: deployment target is CT 103; memory backend is Cognee at 10.20.10.15.", …}}
+{"type":"tool_result","result":"Memory stored (79040879-…, project:project-4be96e7c…)."}
+```
+
+That is model-initiated, not a policy hook.
+
+**Recall hook fires but is one step late.** Seeded record (project dataset, verified by
+`POST /api/v1/search` with `datasetIds:[3d8d8ad8-…]`,
+`searchType:"CHUNKS"`): `created_at 1795319319308`, text
+`The release codename is amber-otter-7731 and the deployment target is CT 103.`
+
+```
+# single-step, no tools, new process:
+{"type":"final","text":"No such memory was given to me in this conversation. My context
+ contains no release codename or deployment target … I won't guess or invent values."}
+
+# two-step (memory_status first), new process:
+{"type":"final","text":"From the recalled project memory (untrusted data, reported as
+ background):\n\n- Release codename: amber-otter-7731\n- Deployment target: CT 103"}
+```
+
+`agent/pre-step` calls `MemoryPromptContext.refresh()` fire-and-forget; per the code
+comment (and confirmed here) assembly for the current step has already happened, so the
+block is visible only from the next step. A one-shot question with no tool call never gets
+a second step, so turn 1 has no memory.
+
+**Scope isolation.** Same two-step prompt with `--patch` overriding
+`scopeDefaults.projectId: dsh/project/other-scope`:
+
+```
+- tool: memory_status (1)
+{"type":"final","text":"… **no memory is available to me** — I have no stored recollection
+ of a release codename or deployment target in this session's context. The recall counter
+ shows one request, but nothing has been surfaced to me…”}
+```
+
+The read path does not create a dataset for the empty scope (`dsh_cognee_project_other-scope`
+does not exist). Existing datasets `dsh/agent/smoke` and
+`dsh_cognee_project_project-4be96e7c2cdbb95a1ac9` were not modified or deleted.
+
+### 7.7 Verdict
+
+| Capability | Result |
+| --- | --- |
+| New build installed/loaded (web + headless, service) | **YES** |
+| `memory_status` / tools live | **YES** (`reachable:true`) |
+| Settings page + auth (200/401/503) | **YES** |
+| Hot retarget without restart | **YES** (same PID) |
+| Automatic cross-conversation **recall** | **PARTIAL** — hook fires, injection works from step 2, never on a one-shot first step |
+| Automatic **write** (hook/policy) | **NO** — no write hook is wired; only model- or caller-invoked `memory_remember` |
+
+End-to-end "say a fact in one conversation, ask in the next one-shot conversation" does
+**not** work. The blockers are structural, not configuration: the missing write hook, and
+the fire-and-forget pre-step refresh that cannot affect the current step's prompt.

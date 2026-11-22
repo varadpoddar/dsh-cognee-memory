@@ -209,7 +209,7 @@ export function registerSettingsRoutes(
           const url = new URL(req.url ?? SETTINGS_PAGE_PATH, 'http://localhost')
           const auth = authorize(req, url, env)
           if (!auth.ok) {
-            sendHtml(res, auth.status, `<h1>403</h1><p>${escapeHtml(auth.message)}</p>`)
+            sendHtml(res, auth.status, `<h1>${auth.status}</h1><p>${escapeHtml(auth.message)}</p>`)
             return
           }
           const token = pageToken(url)

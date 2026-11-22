@@ -5,7 +5,7 @@
  * transport-isolated Cognee adapters, deny-by-default scope policy, and
  * bounded untrusted prompt context.
  */
-import type { PluginContextLike, ToolDefinitionLike } from './types.js'
+import type { PluginContextLike, ToolDefinitionLike, WebServerLike } from './types.js'
 import {
   CogneeMemoryConfigSchema,
   parseConfig,
@@ -103,9 +103,31 @@ export function apply(
 
   // Present only where the profile mounts dsh-host-webserver (the shipped `web`
   // profile does; `headless` does not). Tools and prompt context still apply.
-  if (ctx.webServer !== undefined) {
-    for (const disposeRoutes of registerSettingsRoutes(ctx.webServer, { store: settings })) {
-      disposers.push(disposeRoutes)
+  // Routes are mounted through a nested `ctx.inject`, the idiom DSH's own
+  // packages use: the callback runs only once `webServer` is available, so a
+  // profile without a web server never reads an un-injected service (Cordis
+  // throws on such property reads). Plain test doubles that already expose
+  // `webServer` but no `inject` take the direct branch.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (webCtx) => {
+      if (disposed) return
+      for (const disposeRoutes of registerSettingsRoutes(webCtx.webServer as WebServerLike, {
+        store: settings,
+      })) {
+        disposers.push(disposeRoutes)
+      }
+    })
+  } else {
+    let webServer: WebServerLike | undefined
+    try {
+      webServer = ctx.webServer
+    } catch {
+      webServer = undefined
+    }
+    if (webServer !== undefined) {
+      for (const disposeRoutes of registerSettingsRoutes(webServer, { store: settings })) {
+        disposers.push(disposeRoutes)
+      }
     }
   }
 
