@@ -18,7 +18,12 @@ function harness() {
       if (entry.name === name) entry.listener(...(args as never[]))
     }
   }
-  return { fake, turns, emit, dispose }
+  const emitAsync = async (name: string, ...args: unknown[]): Promise<void> => {
+    for (const entry of fake.listeners) {
+      if (entry.name === name) await (entry.listener(...(args as never[])) as Promise<void>)
+    }
+  }
+  return { fake, turns, emit, emitAsync, dispose }
 }
 
 const session = { id: 'session-a', header: { agentPreset: 'worker' } }
@@ -46,6 +51,60 @@ describe('committed session extraction hook', () => {
       agentPreset: 'worker',
       messages: [{ text: 'Remember that the flag is on.', seq: 7 }],
     })
+  })
+
+  it('awaits extraction before the first model stream of a turn', async () => {
+    const h = harness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 5 })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      turn: 5,
+      message: userMessage('Remember that the flag is on.'),
+    })
+    const chunks: unknown[] = []
+    const stream = (function () {
+      const entry = h.fake.listeners.find((item) => item.name === 'llm/stream')
+      return (entry?.listener as unknown as (
+        options: { sessionId: string },
+        next: () => Generator<string>,
+      ) => AsyncIterable<unknown>)({ sessionId: 'session-a' }, function* () {
+        yield 'chunk'
+      })
+    })()
+    for await (const chunk of stream) chunks.push(chunk)
+    expect(chunks).toEqual(['chunk'])
+    expect(h.turns).toHaveLength(1)
+    // The fallback must not extract the same turn twice.
+    await h.emitAsync('agent/turn-stopping', { agent: session, turn: 5 })
+    expect(h.turns).toHaveLength(1)
+  })
+
+  it('reads the real committed envelope (data field, no top-level turn)', async () => {
+    const h = harness()
+    h.emit('session/event', session, { type: 'turn/start', data: { turn: 9 } })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      seq: 21,
+      data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Remember that the flag is on.' }] },
+    })
+    await h.emitAsync('agent/turn-stopping', { agent: session, turn: 9 })
+    expect(h.turns[0]).toMatchObject({ turn: 9, messages: [{ text: 'Remember that the flag is on.', seq: 21 }] })
+  })
+
+  it('awaits extraction before the turn boundary via turn-stopping', async () => {
+    const h = harness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 4 })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      turn: 4,
+      message: userMessage('Remember that the flag is on.'),
+    })
+    await h.emitAsync('agent/turn-stopping', { agent: session, turn: 4 })
+    expect(h.turns).toHaveLength(1)
+    expect(h.turns[0]).toMatchObject({ sessionId: 'session-a', turn: 4 })
+    h.emit('session/event', session, { type: 'turn/end', turn: 4 })
+    await Promise.resolve()
+    expect(h.turns).toHaveLength(1)
   })
 
   it('ignores assistant reasoning, tool results, and synthetic context', async () => {

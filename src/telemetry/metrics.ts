@@ -8,6 +8,11 @@ export type MetricName =
   | 'remember.failures'
   | 'remember.deduplicated'
   | 'remember.ephemeral'
+  | 'extraction.events'
+  | 'extraction.userMessages'
+  | 'extraction.streams'
+  | 'extraction.streamsWithBucket'
+  | 'extraction.turns'
   | 'extraction.candidates'
   | 'extraction.queued'
   | 'extraction.ingested'
@@ -38,6 +43,11 @@ const METRIC_NAMES: readonly MetricName[] = [
   'remember.failures',
   'remember.deduplicated',
   'remember.ephemeral',
+  'extraction.events',
+  'extraction.userMessages',
+  'extraction.streams',
+  'extraction.streamsWithBucket',
+  'extraction.turns',
   'extraction.candidates',
   'extraction.queued',
   'extraction.ingested',

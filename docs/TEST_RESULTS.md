@@ -99,3 +99,46 @@ claim dedupe, turn invalidation, hard-deadline expiry without stalling, pre-cons
 budget, one retry then degrade, zero-retry mode, empty results, aborted signal,
 disabled prefetch, cached reuse across steps, first-assembly injection, unbound agent,
 unavailable memory, runtime-context/assistant rejection, cross-agent isolation.
+
+## Milestone 2 + 3 — stable identity and automatic extraction (2026-11-22)
+
+Build sha256 `d0f1f0ee361b834b0f4294357f13273ff962da2e72e5fca27094fbe6c3aa9d2f`,
+installed in the headless and web profiles on CT 103; the service restarted at
+21:55 PST. Details, commands, and quoted output: `LIVE_INTEGRATION.md` §9.
+
+| Check | Result |
+| --- | --- |
+| `tsc -p tsconfig.json --noEmit` | pass, 0 errors |
+| `tsc -p tsconfig.build.json` | pass |
+| `npx vitest run` | **37 files / 323 tests passed** |
+| `npx vitest run --config vitest.live.config.ts` | **3 files / 12 tests passed** (real Cognee, read-only + write-then-delete) |
+| One message, `tools.enabled: false`, explicit fact | **PASS** — `tool_events=0`; candidate `mem-803e6be8…` → result `ingested`; `/search` returned the exact text on poll 1 |
+| New process, same principal, first response | **PASS** — new session id, `tool_events=0`, answer contained `silver-otter-5520` / `CT 103` |
+| Different principal + project | **PASS** — "I don't have that information…" |
+| Service restart | **PASS** — `ActiveEnterTimestamp 20:51:48 → 20:55:00`, `active`, zero plugin errors; new process still recalled the fact and Cognee still returned it |
+| Agent scope isolation | **PASS** — `dsh-agent-agent-a` searchable; `agent-b` returned "I don't know its exact form…" |
+| Global scope deny-by-default | **PASS** — unit: `scopeFromName('global')` throws unless `scopes.allowGlobal`; status namespaces omits `global` |
+
+### New unit coverage
+
+| File | Cases | Focus |
+| --- | --- | --- |
+| `test/identity.test.ts` | 9 | principal precedence (config → env → authenticated `/users/me`), never session-derived, probe failure/retry, restart-stable namespaces, principal/project/team/agent isolation, global opt-in |
+| `test/ephemeral.test.ts` | 6 | session-only writes, lost on a new instance, durable scopes rejected, dedupe, forget by id/text, per-session clear |
+| `test/extraction.test.ts` | 20 | all explicit command forms, correction/supersession, canonical keys, idempotency, principal/scope isolation, secrets, sensitivity, transcript/reasoning rejection, private-endpoint table, LLM disabled/default, external endpoint refused, model-inferred mapping, endpoint-down degradation |
+| `test/candidate-queue.test.ts` | 8 | durable replay, dedupe across process, failed candidate does not block, forget result, secret refusal, corrupt-line skip, pending cap, 0600 mode/status |
+| `test/extraction-service.test.ts` | 5 | extract → queue → ingest without a tool, forget path, replay idempotency, no principal refuses writes, disabled no-op |
+| `test/session-extraction.test.ts` | 6 | committed-envelope parsing, awaited `llm/stream` + `turn-stopping` fallback (no duplicate), reasoning/assistant/runtime-context rejection, disposal, exact listener unwind |
+| `test/live/identity-live.test.ts` | 2 | live authenticated principal, `/users/me` UUID namespaces, session-independent, no global by default |
+
+The pre-existing M1 suite remains green; only expectations that encoded the old
+session-derived agent scope and global-by-default behaviour were updated.
+
+### Not covered
+
+* Implicit LLM extraction against the live Studio endpoint (disabled by default;
+  unit tests cover disablement, external-endpoint refusal, mapping, and failure).
+* Multi-tenant operation with one shared Cognee API key; the deployment must set
+  `identity.principalId` per tenant.
+* Automatic retry of `failed` queue entries; they remain visible in
+  `memory_status` for manual reconciliation.

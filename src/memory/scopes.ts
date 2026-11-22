@@ -81,7 +81,11 @@ export function makeScopeRef(scope: MemoryScope, rawId: string): ScopeRef {
     .digest('hex')
     .slice(0, LEGACY_HASH_LENGTH)
   const legacyName = `dsh_cognee_${scope}_${scope}-${legacyHash}`
-  return Object.freeze({ scope, id, legacyName })
+  // Non-enumerable: adapters may read it for M1 compatibility, but tool-value
+  // serialization never exposes it and DSH's strict output schema stays valid.
+  const ref: { scope: MemoryScope; id: string; legacyName?: string } = { scope, id }
+  Object.defineProperty(ref, 'legacyName', { value: legacyName, enumerable: false })
+  return Object.freeze(ref)
 }
 
 export function globalScope(): ScopeRef {

@@ -12,6 +12,7 @@ interface SessionEventLike {
   readonly turn?: unknown
   readonly seq?: unknown
   readonly message?: unknown
+  readonly data?: unknown
 }
 
 interface TurnMessage {
@@ -22,6 +23,19 @@ interface TurnMessage {
 interface TurnBucket {
   readonly turn: number
   readonly messages: TurnMessage[]
+}
+
+interface TurnStoppingPayload {
+  readonly agent?: SessionLike
+  readonly turn?: unknown
+}
+
+interface LlmStreamOptions {
+  readonly sessionId?: unknown
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
 }
 
 function textFromMessage(message: unknown): string {
@@ -64,22 +78,34 @@ export function registerSessionExtraction(
   },
 ): () => void {
   const buckets = new Map<string, TurnBucket>()
+  const sessions = new Map<string, SessionLike>()
 
   const onSessionEvent = (session: SessionLike, event: SessionEventLike): void => {
     try {
+      deps.metrics?.increment('extraction.events')
       const sessionId = sessionIdOf(session)
       if (sessionId === undefined) return
+      sessions.set(sessionId, session)
+      const data = isRecord(event.data) ? event.data : undefined
+      const payloadTurn =
+        typeof event.turn === 'number'
+          ? event.turn
+          : data !== undefined && typeof data.turn === 'number'
+            ? data.turn
+            : undefined
       if (event.type === 'turn/start') {
-        const turn = typeof event.turn === 'number' ? event.turn : 0
-        buckets.set(sessionId, { turn, messages: [] })
+        buckets.set(sessionId, { turn: payloadTurn ?? 0, messages: [] })
         return
       }
       if (event.type === 'user/message') {
-        const text = textFromMessage(event.message)
+        // The committed log envelope puts the message under `data`; accept the
+        // flat test shape as well so unit doubles stay readable.
+        const text = textFromMessage(event.message ?? data)
         if (text === '') return
+        deps.metrics?.increment('extraction.userMessages')
         let bucket = buckets.get(sessionId)
         if (bucket === undefined) {
-          bucket = { turn: typeof event.turn === 'number' ? event.turn : 0, messages: [] }
+          bucket = { turn: payloadTurn ?? 0, messages: [] }
           buckets.set(sessionId, bucket)
         }
         bucket.messages.push({
@@ -109,13 +135,82 @@ export function registerSessionExtraction(
     }
   }
 
+  /**
+   * The loop appends the committed user/message events before it asks the LLM
+   * for the first stream chunk. Awaiting extraction here guarantees a one-shot
+   * headless process never exits before the candidate is queued and Cognee
+   * confirms ingestion, while still reading only committed session records.
+   */
+  const onLlmStream = (
+    options: LlmStreamOptions,
+    next: () => AsyncIterable<unknown>,
+  ): AsyncIterable<unknown> => {
+    return (async function* streamAfterExtraction() {
+      deps.metrics?.increment('extraction.streams')
+      const sessionId = typeof options.sessionId === 'string' ? options.sessionId : undefined
+      if (sessionId !== undefined) {
+        const bucket = buckets.get(sessionId)
+        const session = sessions.get(sessionId)
+        if (bucket !== undefined && bucket.messages.length > 0) {
+          deps.metrics?.increment('extraction.streamsWithBucket')
+          buckets.delete(sessionId)
+          try {
+            await deps.extraction.handleTurn({
+              sessionId,
+              turn: bucket.turn,
+              messages: bucket.messages,
+              ...(typeof session?.header?.agentPreset === 'string' &&
+              session.header.agentPreset !== ''
+                ? { agentPreset: session.header.agentPreset }
+                : {}),
+            })
+          } catch {
+            deps.metrics?.increment('extraction.failed')
+          }
+        }
+      }
+      yield* next()
+    })()
+  }
+
+  /**
+   * Fallback for hosts that reach a turn boundary without a model stream.
+   * The loop awaits this serial hook before the boundary commits.
+   */
+  const onTurnStopping = async (payload: TurnStoppingPayload): Promise<void> => {
+    deps.metrics?.increment('extraction.turns')
+    const session = payload.agent
+    if (session === undefined) return
+    const sessionId = sessionIdOf(session)
+    if (sessionId === undefined) return
+    const bucket = buckets.get(sessionId)
+    if (bucket === undefined || bucket.messages.length === 0) return
+    buckets.delete(sessionId)
+    const preset = session.header?.agentPreset
+    try {
+      await deps.extraction.handleTurn({
+        sessionId,
+        turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
+        messages: bucket.messages,
+        ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
+      })
+    } catch {
+      deps.metrics?.increment('extraction.failed')
+    }
+  }
+
   const onDisposed = (session: SessionLike): void => {
     const sessionId = sessionIdOf(session)
-    if (sessionId !== undefined) buckets.delete(sessionId)
+    if (sessionId !== undefined) {
+      buckets.delete(sessionId)
+      sessions.delete(sessionId)
+    }
   }
 
   const disposers: Array<() => unknown> = [
     ctx.on('session/event', onSessionEvent as never),
+    ctx.on('llm/stream', onLlmStream as never),
+    ctx.on('agent/turn-stopping', onTurnStopping as never),
     ctx.on('session/disposed', onDisposed as never),
   ]
   return () => {
@@ -127,5 +222,6 @@ export function registerSessionExtraction(
       }
     }
     buckets.clear()
+    sessions.clear()
   }
 }

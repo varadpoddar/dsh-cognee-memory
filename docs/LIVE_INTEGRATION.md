@@ -636,3 +636,167 @@ The two overlays live only in `/var/lib/deepseek-harness/` (`gate1-*.yml`, root
 0644). The profile config still has `tools.enabled: true`; nothing in
 `.dsh/profiles` was edited. The service was not restarted (headless runs are
 separate processes). `deepseek-harness.service` remains `active`.
+
+## 9. Milestone 2 identity + Milestone 3 automatic extraction (2026-11-21 20:45–20:55 PST)
+
+Build `d0f1f0ee361b834b0f4294357f13273ff962da2e72e5fca27094fbe6c3aa9d2f`
+(sha256 of `dsh-cognee-memory-0.1.0.tgz`) installed into
+`/var/lib/deepseek-harness/.dsh/profiles/{headless,web}`. Installing over the
+existing profile again required removing that profile's `node_modules` and
+`pnpm-lock.yaml`: the profile had been linked by pnpm 12.21.0 (store v11), and
+the current `dsh` installer runs pnpm 10.34.9 (store v10). Backups:
+`/root/{headless,web}-backup-m2m3`. The service was restarted afterwards.
+
+### 9.1 Namespace scheme actually used
+
+The namespace is built from trusted identity only; no durable namespace contains
+a DSH session id, and no tool argument or prompt can select a namespace.
+
+| Scope | Durable namespace | Source |
+| --- | --- | --- |
+| `session` | `dsh-session-<session-slug>` | DSH session id, **in-process only, never sent to Cognee** |
+| `agent` | `dsh-agent-<agent-slug>` | committed session header `agentPreset`, or deployment `identity.agentId`; never the session id |
+| `user` | `dsh-user-<principal-slug>` | `identity.principalId` (trusted config) → `DSH_MEMORY_PRINCIPAL` → authenticated Cognee `/users/me` id |
+| `project` | `dsh-project-<project-slug>` | `identity.projectId` → `scopeDefaults.projectId` → cwd |
+| `team` | `dsh-team-<team-slug>` | `identity.teamId` → `scopeDefaults.teamId` |
+| `global` | `dsh-global` | only when `scopes.allowGlobal: true`; deny-by-default |
+
+Slugs are deterministic NFKC lowercase `[a-z0-9._-]`; a 20-hex SHA-256 suffix is
+appended when normalization loses information, so two distinct raw ids cannot
+silently merge. The live acceptance run produced:
+
+```
+memory namespaces: {"user":"dsh-user-05a6c959-3357-4a6d-a52a-1ad79ab16d8e",
+                    "project":"dsh-project-m2m3-live"}
+datasets: dsh-project-m2m3-live  91ac8783-371e-5cac-b7bf-d2fb43b1ce7b
+          dsh-agent-agent-a      eee9e637-4cc3-55a0-9b2e-4828f26162ea
+```
+
+`session` writes are held in `EphemeralSessionMemory` inside `MemoryCoordinator`
+and are rejected by both Cognee adapters as a second line of defence. A restart
+therefore loses session memory by construction. M1's hashed dataset names
+(`dsh_cognee_project_project-4be96e7c2cdbb95a1ac9` etc.) remain readable through
+a non-enumerable `legacyName` alias; new writes always use the current namespace.
+
+### 9.2 Automatic extraction without tools
+
+`src/hooks/session-events.ts` subscribes to `session/event` (post-commit) and
+`agent/turn-stopping`; it also wraps the first `llm/stream` of each turn. The
+user message is already committed to the session log before that first stream
+request, so extraction runs there and the async waterfall awaits it. This is the
+durable seam for a one-shot headless process: the process cannot exit before the
+candidate is queued and Cognee confirms ingestion. No tool registration is
+involved, so `tools.enabled: false` changes nothing.
+
+Deterministic commands (no model, no network):
+
+* `remember that …`, `remember: …`, `keep in mind that …`, `don't forget …`, `note: …`
+* `forget …`, `forget that …`, `drop …`, `remove from memory …`
+* `actually …`, `correction: …` (supersedes the most recent matching candidate)
+
+Optional implicit extraction is `extraction.llm.enabled: false` by default and
+refuses any endpoint that is not loopback/RFC1918 (`assertPrivateEndpoint`), so
+content cannot be routed to an external provider. Fetch/parse/timeout failures
+return no candidates.
+
+Candidates are written to `$DSH_HOME/cognee-memory/candidates.jsonl` (mode 0600,
+directory 0700), then drained one at a time into the coordinator. Each candidate
+carries: stable `mem-<32hex>` id, canonical `semanticKey`, `principalId`, `scope`,
+`content`, `sourceRefs`, `verificationState`, `sensitivity`, `createdAt`,
+optional `supersedes`, `idempotencyKey`, and operation. Every enqueue re-checks
+`findSecrets`; assistant output, reasoning blocks, runtime-context messages,
+whole transcripts, and speculation are never candidates.
+
+### 9.3 Acceptance run — numbered evidence
+
+All harness runs used `/var/lib/deepseek-harness/m2m3-accept.yml`, a read-only
+root-owned overlay (not written into the profile):
+
+```yaml
+tools: { enabled: false }
+scopeDefaults: { projectId: m2m3-accept }
+extraction: { enabled: true, deterministic: true, scope: project, llm: { enabled: false } }
+```
+
+**1. Unit, live, typecheck, build.** `npx vitest run` → **37 files / 323 tests
+passed**; `npx tsc -p tsconfig.json --noEmit` → 0 errors; `npm run build` → pass;
+`npx vitest run --config vitest.live.config.ts` → **3 files / 12 tests passed**.
+
+**2. One message, tools off, explicit durable fact.** Prompt:
+`Remember that the acceptance marker is silver-otter-5520 and the target host is CT 103.`
+
+```
+tool_events=0
+{"type":"candidate", ... "semanticKey":"acceptance-marker",
+ "principalId":"05a6c959-3357-4a6d-a52a-1ad79ab16d8e",
+ "scope":{"scope":"project","id":"m2m3-accept"}, ...}
+{"type":"result","status":"ingested","at":"2026-11-22T04:54:08.441Z", ...}
+poll1 ['the acceptance marker is silver-otter-5520 and the target host is CT 103']
+dataset dsh-project-m2m3-accept 283077b0-c9f3-577c-8ade-a74b992195d8
+```
+
+The queue transitioned candidate → `ingested` in 115 ms; Cognee `/search` with
+`CHUNKS` returned the exact text on the first poll. No `memory_*` tool exists in
+this run (`tools.enabled: false`).
+
+**3. New process, same principal, first response.** New session id
+`session-b20ee294-…` (the write was `session-880a8645-…`), `tool_events=0`:
+
+```
+{"type":"final","text":"Based on the recalled context available to me:
+ - Acceptance marker: silver-otter-5520
+ - Target host: CT 103 ..."}
+```
+
+The model's reasoning attributes this to the injected recalled-memory block, not
+to a tool result or to conversation history.
+
+**4. Different principal and project.** Overlay adds
+`identity.principalId: other-principal` and `projectId: m2m3-accept-other`:
+
+```
+{"type":"final","text":"I don't have that information. There's no prior context
+ in this session mentioning an acceptance marker or a target host..."}
+```
+
+**5. Restart the real service; both persist.**
+
+```
+before: ActiveEnterTimestamp=Sat 2026-11-21 20:51:48 PST
+after:  ActiveEnterTimestamp=Sat 2026-11-21 20:55:00 PST
+systemctl is-active deepseek-harness.service → active
+```
+
+New process after the restart (`session-fb007916-…`, `tool_events=0`):
+
+```
+{"type":"final","text":"From what's already in my context:
+ - Acceptance marker: silver-otter-5520
+ - Target host: CT 103 ..."}
+```
+
+Cognee still returns the record: `['the acceptance marker is silver-otter-5520
+and the target host is CT 103']`. The namespace and dataset UUID are unchanged,
+which is the M2 restart property.
+
+### 9.4 Agent isolation check
+
+Agent-scoped write as `identity.agentId: agent-a` produced dataset
+`dsh-agent-agent-a` (`eee9e637-…`) and search returned
+`the agent-only marker is cobalt-heron-8833`. Re-running with
+`identity.agentId: agent-b` against the same project answered
+`I don't have a specific, well-defined "agent-only marker" … I don't know its
+exact form from what I already know`. The two namespaces are disjoint and neither
+contains the session id.
+
+### 9.5 Remaining risks / not covered
+
+* DSH 0.2.1-rc.5 exposes no authenticated per-request principal to a root plugin;
+  the deployment binds the principal through trusted config/env, and the
+  authenticated Cognee `/users/me` id is the default. A deployment exposing the
+  same Cognee key to unrelated humans must set `identity.principalId` per tenant.
+* Failed queue entries stay recorded as `failed` and are not retried
+  automatically; they are visible in `memory_status` for an operator.
+* Implicit LLM extraction was intentionally left disabled for acceptance; only
+  its mock/private-endpoint behaviour is tested live-off.
+* M1's legacy alias is read-only; a future cleanup can migrate those datasets.
