@@ -1,9 +1,10 @@
 /**
  * dsh-cognee-memory — persistent Cognee-backed memory for DeepSeek Harness.
  *
- * Phase 1 scaffold: verified DSH 0.2.1-rc.5 tool and prompt registrations,
- * transport-isolated Cognee adapters, deny-by-default scope policy, and
- * bounded untrusted prompt context.
+ * Verified DSH 0.2.1-rc.5 tool and prompt registrations, transport-isolated
+ * Cognee adapters, a deny-by-default scope policy, a bounded `Known context:`
+ * injection, and an authenticated provenance view (host routes + browser
+ * side-panel tab) for every recalled memory.
  */
 import type { PluginContextLike, ToolDefinitionLike, WebServerLike } from './types.js'
 import {
