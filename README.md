@@ -33,6 +33,27 @@ redacted payloads, timings, E2E) and [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.
   roadmap.
 - **[`docs/LIVE_INTEGRATION.md`](docs/LIVE_INTEGRATION.md)** — live verification
   and the CT 103 install/E2E record.
+- **[`docs/SETTINGS.md`](docs/SETTINGS.md)** — the runtime-editable Cognee address:
+  page URL, precedence, hot-reload matrix, and what is never exposed.
+- **[`docs/WEB_PROFILE_VISIBILITY.md`](docs/WEB_PROFILE_VISIBILITY.md)** — why an
+  installed plugin can be missing from the long-running `web` profile, and how to
+  confirm it in one command.
+
+## Runtime settings (no file editing, no restart for the address)
+
+The plugin serves its own settings page through the only web extension point
+0.2.1-rc.5 offers a package, `ctx.webServer.register`:
+
+- `GET|POST /plugins/cognee-memory/settings` — HTML form (URL, optional MCP URL, enable toggle)
+- `GET /plugins/cognee-memory/settings.json` — JSON status
+
+Both require `COGNEE_MEMORY_SETTINGS_TOKEN` (`?token=...` or `Authorization: Bearer ...`)
+and answer `503` when it is unset, so nothing is writable by default. Settings persist to
+`$DSH_HOME/plugins/cognee-memory/settings.json` and outrank the environment, which
+outranks the profile entry. A saved URL applies to the **next** memory call — the HTTP
+client resolves the endpoint per request. The Cognee key is never stored, rendered, or
+logged: the page shows only `set`/`unset` for `COGNEE_API_KEY`.
+
 
 ## What works today
 

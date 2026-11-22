@@ -25,6 +25,8 @@ export interface CoordinatorDependencies {
   readonly metrics?: Metrics
   readonly cwd?: string
   readonly clock?: () => Date
+  /** Live Cognee endpoint source; see `HttpJsonClientOptions.endpoint`. */
+  readonly endpoint?: () => string
 }
 
 export interface RememberRequest {
@@ -76,6 +78,7 @@ export class MemoryCoordinator {
   private readonly metrics: Metrics | undefined
   private readonly cwd: string | undefined
   private readonly clock: () => Date
+  readonly endpointSource: (() => string) | undefined
   private readonly dedup = new DedupIndex()
 
   constructor(dependencies: CoordinatorDependencies) {
@@ -84,9 +87,18 @@ export class MemoryCoordinator {
     this.metrics = dependencies.metrics
     this.cwd = dependencies.cwd
     this.clock = dependencies.clock ?? (() => new Date())
+    this.endpointSource = dependencies.endpoint
     this.recallService = new RecallService(dependencies, {
       ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
     })
+  }
+
+  /**
+   * Endpoint the next call will use. Reads the live settings source when the
+   * plugin was wired with one, so `memory_status` never reports a stale target.
+   */
+  activeEndpoint(): string {
+    return this.endpointSource?.() ?? this.config.apiBaseUrl
   }
 
   policyFor(identity: CallerIdentity): AccessPolicy {
@@ -219,12 +231,12 @@ export class MemoryCoordinator {
       reachable: adapter.reachable,
       authMode: this.config.authMode,
       failureMode: this.config.failureMode,
-      endpoint: safeEndpoint(this.config.apiBaseUrl),
+      endpoint: safeEndpoint(this.activeEndpoint()),
     }
     return {
       adapter: { ...adapter, details: { ...adapter.details, ...details } },
       transport: adapter.transport,
-      endpoint: safeEndpoint(this.config.apiBaseUrl),
+      endpoint: safeEndpoint(this.activeEndpoint()),
       authMode: this.config.authMode,
       failureMode: this.config.failureMode,
       metrics: this.metrics?.snapshot() ?? { counters: {} },

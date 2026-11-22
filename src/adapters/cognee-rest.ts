@@ -39,6 +39,8 @@ export interface CogneeAdapterRuntime {
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>
   readonly random?: () => number
   readonly metrics?: Metrics
+  /** Live endpoint source; see `HttpJsonClientOptions.endpoint`. */
+  readonly endpoint?: () => string
 }
 
 function fallbackId(input: RememberInput): string {

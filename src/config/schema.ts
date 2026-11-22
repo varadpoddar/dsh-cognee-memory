@@ -23,6 +23,13 @@ const httpUrl = z
     { message: 'must be an absolute http(s) URL without embedded credentials' },
   )
 
+/**
+ * The one URL contract for Cognee endpoints: absolute http(s), no embedded
+ * credentials. Exported so the runtime settings page validates exactly the rule
+ * the profile config validates instead of drifting from it.
+ */
+export const httpUrlSchema = httpUrl
+
 const transportSchema = z.enum(['mcp-http', 'mcp-stdio', 'rest', 'auto'])
 const authModeSchema = z.enum(['none', 'bearer', 'api-key'])
 const failureModeSchema = z.enum(['open', 'closed'])

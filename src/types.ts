@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+
 /** Lossless JSON value used at adapter and tool boundaries. */
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
@@ -185,7 +187,27 @@ export interface PluginContextLike {
     context(registration: PromptContextRegistration): () => void
     section(registration: PromptSectionRegistration): () => void
   }
+  /**
+   * Present only in composed profiles that mount `dsh-host-webserver` (the
+   * shipped `web` profile does; `headless` does not). Optional so the plugin
+   * still applies with tools and prompt context when no web server exists.
+   */
+  readonly webServer?: WebServerLike
   on(name: string, listener: (...args: never[]) => unknown): () => unknown
   effect?(execute: () => (() => void) | void): () => unknown
   logger?(name: string): PluginLoggerLike
 }
+
+/** One route registration accepted by `ctx.webServer.register` (verified shape). */
+export interface WebRouteLike {
+  readonly kind: 'exact' | 'prefix'
+  /** Absolute pathname, no trailing slash. */
+  readonly path: string
+  readonly handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+}
+
+/** Structural subset of `dsh-host-webserver`'s `WebServer` service. */
+export interface WebServerLike {
+  register(route: WebRouteLike): () => void
+}
+

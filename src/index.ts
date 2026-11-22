@@ -15,6 +15,8 @@ import { createMemoryAdapter } from './adapters/memory-adapter.js'
 import { MemoryCoordinator } from './memory/coordinator.js'
 import { Metrics } from './telemetry/metrics.js'
 import { registerAgentLifecycle } from './hooks/agent-lifecycle.js'
+import { SettingsStore, resolveSettingsPath } from './settings/store.js'
+import { registerSettingsRoutes } from './settings/http.js'
 import { createRecallTool } from './tools/recall.js'
 import { createRememberTool } from './tools/remember.js'
 import { createForgetTool } from './tools/forget.js'
@@ -38,6 +40,14 @@ export const Config = CogneeMemoryConfigSchema
 export type { CogneeMemoryConfig }
 export { CogneeMemoryConfigSchema, parseConfig }
 export { MemoryCoordinator } from './memory/coordinator.js'
+export { SettingsStore, resolveSettingsPath, SETTINGS_ENV } from './settings/store.js'
+export {
+  registerSettingsRoutes,
+  renderSettingsPage,
+  SETTINGS_PAGE_PATH,
+  SETTINGS_JSON_PATH,
+} from './settings/http.js'
+export { validateCogneeUrl } from './settings/url.js'
 export { MemoryError, UnsupportedOperationError, RedactionBlockedError } from './errors.js'
 export { MemoryPromptContext } from './hooks/prompt-context.js'
 export { TaskLifecycleRecorder } from './hooks/task-lifecycle.js'
@@ -52,12 +62,26 @@ export function apply(
   ctx: PluginContextLike,
   configInput?: unknown,
 ): (() => void) | undefined {
-  const config = parseConfig(configInput)
+  const bootConfig = parseConfig(configInput)
+
+  /**
+   * Runtime settings: a persisted JSON file that outranks the environment, which
+   * outranks this profile entry. Re-read when it changes on disk, so both the
+   * settings page and a hand edit take effect on the next call.
+   */
+  const settings = new SettingsStore({
+    filePath: resolveSettingsPath(process.env),
+    baseConfig: bootConfig,
+    env: process.env,
+  })
+  const config = settings.current()
   if (!config.enabled) return undefined
 
+  const endpoint = (): string => settings.current().apiBaseUrl
+
   const metrics = new Metrics()
-  const adapter = createMemoryAdapter({ config, metrics, env: process.env })
-  const coordinator = new MemoryCoordinator({ adapter, config, metrics })
+  const adapter = createMemoryAdapter({ config, metrics, env: process.env, endpoint })
+  const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint })
 
   const disposers: Array<() => unknown> = []
   let disposed = false
@@ -76,6 +100,14 @@ export function apply(
   }
 
   disposers.push(registerAgentLifecycle(ctx, { coordinator, config, metrics }))
+
+  // Present only where the profile mounts dsh-host-webserver (the shipped `web`
+  // profile does; `headless` does not). Tools and prompt context still apply.
+  if (ctx.webServer !== undefined) {
+    for (const disposeRoutes of registerSettingsRoutes(ctx.webServer, { store: settings })) {
+      disposers.push(disposeRoutes)
+    }
+  }
 
   if (config.tools.enabled) {
     const tools: ToolDefinitionLike[] = [

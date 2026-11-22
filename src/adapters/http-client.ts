@@ -17,6 +17,12 @@ export interface HttpJsonClientOptions {
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>
   readonly random?: () => number
   readonly metrics?: Metrics
+  /**
+   * Live endpoint source consulted on every request. The runtime settings page
+   * mutates this after a validated change, so a new Cognee address takes effect
+   * for subsequent calls without rebuilding the adapter or restarting the host.
+   */
+  readonly endpoint?: () => string
 }
 
 export interface HttpRequestOptions {
@@ -130,6 +136,7 @@ function statusError(
 export class HttpJsonClient {
   private readonly config: CogneeMemoryConfig
   private readonly baseUrl: string
+  private readonly endpoint: (() => string) | undefined
   private readonly fetchImpl: typeof fetch
   private readonly breaker: CircuitBreaker | undefined
   private readonly metrics: Metrics | undefined
@@ -141,6 +148,7 @@ export class HttpJsonClient {
   constructor(options: HttpJsonClientOptions) {
     this.config = options.config
     this.baseUrl = options.config.apiBaseUrl
+    this.endpoint = options.endpoint
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init))
     this.metrics = options.metrics
     this.resolver = createEnvSecretResolver(options.env ?? process.env)
@@ -161,7 +169,7 @@ export class HttpJsonClient {
   }
 
   async request(options: HttpRequestOptions): Promise<HttpResult> {
-    const url = buildUrl(this.baseUrl, options)
+    const url = buildUrl(this.endpoint?.() ?? this.baseUrl, options)
     const authHeaders = buildAuthHeaders(this.config, this.resolver)
     const headers: Record<string, string> = {
       accept: 'application/json',
