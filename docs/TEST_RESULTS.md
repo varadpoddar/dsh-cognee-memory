@@ -102,7 +102,7 @@ unavailable memory, runtime-context/assistant rejection, cross-agent isolation.
 
 ## Milestone 2 + 3 — stable identity and automatic extraction (2026-11-22)
 
-Build sha256 `d0f1f0ee361b834b0f4294357f13273ff962da2e72e5fca27094fbe6c3aa9d2f`,
+Build sha256 `9710845eac3f65f3a9727f46ddca243462d540bcbba3852ad2ddb48a6b4a37d8`,
 installed in the headless and web profiles on CT 103; the service restarted at
 21:55 PST. Details, commands, and quoted output: `LIVE_INTEGRATION.md` §9.
 

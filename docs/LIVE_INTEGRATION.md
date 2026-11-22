@@ -639,7 +639,7 @@ separate processes). `deepseek-harness.service` remains `active`.
 
 ## 9. Milestone 2 identity + Milestone 3 automatic extraction (2026-11-21 20:45–20:55 PST)
 
-Build `d0f1f0ee361b834b0f4294357f13273ff962da2e72e5fca27094fbe6c3aa9d2f`
+Build `9710845eac3f65f3a9727f46ddca243462d540bcbba3852ad2ddb48a6b4a37d8`
 (sha256 of `dsh-cognee-memory-0.1.0.tgz`) installed into
 `/var/lib/deepseek-harness/.dsh/profiles/{headless,web}`. Installing over the
 existing profile again required removing that profile's `node_modules` and
