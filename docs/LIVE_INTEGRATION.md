@@ -876,7 +876,18 @@ panels the page shows: `ingestion {succeeded:1,failed:0}`, first-turn
 `{attempts:1,hits:1,hitRate:1}`, recall latency `{p50:188ms,p95:196ms}`, context
 tokens `{last:48,total:48}`, `memory.count:11`, state `recall-verified:1`.
 
-### 10.4 Not covered / deferred
+### 10.4 M4 live evidence (real subagent)
+
+```text
+run    dsh --profile headless --patch m4-task.yml  (tools enabled, scope m4-task-accept-1795324605)
+event  tool_call subagent {description:"Reply with OK", …}
+final  "Confirmed — the subagent has fully finished … its final reply was OK"
+search dataset dsh-project-m4-task-accept-1795324605 (CHUNKS)
+HIT    task subagent:5a891112-a444-4e53-a510-b3fe8e524544 v1: completed — provider spawn
+       run ended with stopReason=completed (child 3e9f90c5-…) [evidence: subagent/end:5a891112-…]
+```
+
+### 10.5 Not covered / deferred
 
 * No destructive test was run: no item `DELETE`, no dataset deletion, no
   consolidation, no `kill -9`. Startup recovery is unit-tested only.

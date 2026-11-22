@@ -225,6 +225,21 @@ reported `memory.count: 11`, `datasets: 9`, queue `{ingested: 2}`, and an
 Its ingestion/recall panels are per-process and read 0 until that process itself
 writes/recalls — the probe numbers above are from a process that did.
 
+### Milestone 4 — live subagent settlement
+
+A real headless run with tools enabled asked the model to spawn one subagent
+(prompt: "reply with the single word OK"). The plugin's `subagent/end`
+subscription recorded a completion in the isolated project dataset
+`dsh-project-m4-task-accept-1795324605`, verified by a CHUNKS search:
+
+```
+HIT task subagent:5a891112-a444-4e53-a510-b3fe8e524544 v1: completed — provider spawn
+    run ended with stopReason=completed (child 3e9f90c5-…) [evidence: subagent/end:5a891112-…]
+```
+
+No assistant text from the child was stored; only the terminal `stopReason`,
+run identity, and evidence pointer.
+
 ### End-to-end on CT 103 (headless, tools off, isolated scopes)
 
 | # | Check | Result |
