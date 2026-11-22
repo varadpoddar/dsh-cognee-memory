@@ -102,6 +102,22 @@ export function provenanceFromTool(
   })
 }
 
+/** Provenance for a fact stated in a committed direct user message. */
+export function provenanceFromSessionEvent(input: {
+  readonly sessionId: string
+  readonly turn: number
+  readonly seq?: number
+  readonly evidence: string
+}): Provenance {
+  return createProvenance({
+    kind: 'session_event',
+    source: 'hook:session/event',
+    sessionId: input.sessionId,
+    turn: input.turn,
+    evidence: input.evidence,
+  })
+}
+
 /** The only supported automatic write-back source in Phase 1. */
 export function provenanceFromTaskOutcome(
   outcome: TaskOutcomeEvidence,

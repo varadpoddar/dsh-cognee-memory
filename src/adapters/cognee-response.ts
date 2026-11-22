@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { JsonValue, MemoryRecord, RecallHit, ScopeRef } from '../types.js'
-import { scopeKey } from '../memory/scopes.js'
+import { legacyScopeKey, scopeKey } from '../memory/scopes.js'
 import { isPipelineComplete, isPipelineFailed } from './cognee-paths.js'
 
 /** True for a lossless JSON object. */
@@ -103,6 +103,7 @@ function matchScope(name: string | undefined, scopes: readonly ScopeRef[]): Scop
   for (const scope of scopes) {
     if (
       normalized === scopeKey(scope) ||
+      normalized === legacyScopeKey(scope) ||
       normalized === scope.id ||
       normalized === `${scope.scope}:${scope.id}` ||
       normalized === `${scope.scope}/${scope.id}`

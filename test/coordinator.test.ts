@@ -30,7 +30,7 @@ describe('MemoryCoordinator.remember', () => {
     })
   })
 
-  it('honors an explicit writable session scope', async () => {
+  it('keeps an explicit session scope ephemeral and never calls the backend', async () => {
     const harness = createHarness()
     await harness.coordinator.remember({
       text: 'session fact',
@@ -38,7 +38,14 @@ describe('MemoryCoordinator.remember', () => {
       scopeName: 'session',
       provenance,
     })
-    expect(harness.calls.remember[0]?.scope).toEqual(SESSION_SCOPE)
+    expect(harness.calls.remember).toHaveLength(0)
+    const hits = await harness.coordinator.recall({
+      text: 'session fact',
+      identity: identity(),
+      limit: 5,
+    })
+    expect(hits.map((hit) => hit.record.text)).toContain('session fact')
+    expect(hits[0]?.record.scope).toEqual(SESSION_SCOPE)
   })
 
   it('denies a scope the caller does not have', async () => {

@@ -2,6 +2,8 @@ import { MemoryError, isMemoryError, toMemoryError } from '../errors.js'
 import type { CogneeMemoryConfig } from '../config/schema.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type { CallerIdentity, MemoryAdapter, RecallHit, RecallQuery, ScopeRef } from '../types.js'
+import type { EphemeralSessionMemory } from './ephemeral.js'
+import type { IdentityResolver } from './identity.js'
 import { buildAccessPolicy, type AccessPolicy } from '../security/access-policy.js'
 import { formatScope, sameScope, scopesForIdentity } from './scopes.js'
 
@@ -9,6 +11,8 @@ export interface RecallDependencies {
   readonly adapter: MemoryAdapter
   readonly config: CogneeMemoryConfig
   readonly metrics?: Metrics
+  readonly identityResolver?: IdentityResolver
+  readonly ephemeral?: EphemeralSessionMemory
 }
 
 export interface RecallRequest {
@@ -46,16 +50,25 @@ export class RecallService {
   private readonly config: CogneeMemoryConfig
   private readonly metrics: Metrics | undefined
   private readonly cwd: string | undefined
+  private readonly identityResolver: IdentityResolver | undefined
+  private readonly ephemeral: EphemeralSessionMemory | undefined
 
   constructor(dependencies: RecallDependencies, options: RecallServiceOptions = {}) {
     this.adapter = dependencies.adapter
     this.config = dependencies.config
     this.metrics = dependencies.metrics
     this.cwd = options.cwd
+    this.identityResolver = dependencies.identityResolver
+    this.ephemeral = dependencies.ephemeral
   }
 
-  policyFor(identity: CallerIdentity): AccessPolicy {
-    return buildAccessPolicy(scopesForIdentity(identity, this.config, this.cwd))
+  async policyFor(identity: CallerIdentity): Promise<AccessPolicy> {
+    const resolved = await this.resolveIdentity(identity)
+    return buildAccessPolicy(scopesForIdentity(resolved, this.config, this.cwd))
+  }
+
+  private async resolveIdentity(identity: CallerIdentity): Promise<CallerIdentity> {
+    return this.identityResolver === undefined ? identity : this.identityResolver.resolve(identity)
   }
 
   async recall(request: RecallRequest): Promise<RecallHit[]> {
@@ -67,11 +80,14 @@ export class RecallService {
       throw new MemoryError('VALIDATION', 'recall query must not be empty')
     }
     const limit = Math.max(1, Math.min(request.limit ?? 5, 50))
-    const policy = this.policyFor(request.identity)
+    const identity = await this.resolveIdentity(request.identity)
+    const policy = await this.policyFor(identity)
     const scopes: readonly ScopeRef[] = policy.readableScopes
+    const sessionScopes = scopes.filter((scope) => scope.scope === 'session')
+    const durableScopes = scopes.filter((scope) => scope.scope !== 'session')
     const query: RecallQuery = {
       text,
-      scopes,
+      scopes: durableScopes,
       limit: Math.min(100, limit * 3),
       ...(request.minScore === undefined ? {} : { minScore: request.minScore }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
@@ -79,7 +95,17 @@ export class RecallService {
 
     this.metrics?.increment('recall.requests')
     try {
-      const raw = await this.adapter.recall(query)
+      const durable = durableScopes.length === 0 ? [] : await this.adapter.recall(query)
+      const ephemeral =
+        this.ephemeral === undefined || sessionScopes.length === 0
+          ? []
+          : this.ephemeral.recall({
+              text,
+              scopes: sessionScopes,
+              limit,
+              ...(request.signal === undefined ? {} : { signal: request.signal }),
+            })
+      const raw = [...ephemeral, ...durable]
       const filtered = dedupeHits(raw)
         .filter((hit) => hit.record.text.trim() !== '' && hit.record.id.trim() !== '')
         .filter((hit) => policy.canRead(hit.record.scope))

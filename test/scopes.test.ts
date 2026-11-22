@@ -14,19 +14,24 @@ import {
   scopesForIdentity,
 } from '../src/memory/scopes.js'
 
-const config = parseConfig({ scopeDefaults: { projectId: '/workspace/demo', teamId: 'team-a' } })
+const config = parseConfig({
+  scopeDefaults: { projectId: '/workspace/demo', teamId: 'team-a' },
+  scopes: { allowGlobal: true },
+})
 
 describe('stable scope ids', () => {
   it('derives a deterministic opaque id without the raw value', () => {
     const first = makeScopeRef('session', 'session-abc')
     const second = makeScopeRef('session', 'session-abc')
     expect(first).toEqual(second)
-    expect(first.id).not.toContain('session-abc')
-    expect(scopeKey(first)).toBe(`dsh_cognee_session_${first.id}`)
+    expect(first.id).toBe('session-abc')
+    expect(scopeKey(first)).toBe('dsh-session-session-abc')
   })
 
   it('separates the same raw id in different scopes', () => {
-    expect(scopeIdFor('session', 'same')).not.toBe(scopeIdFor('agent', 'same'))
+    expect(scopeKey(makeScopeRef('session', 'same'))).not.toBe(
+      scopeKey(makeScopeRef('agent', 'same')),
+    )
   })
 
   it('keeps global as one singleton scope', () => {
@@ -58,12 +63,13 @@ describe('stable scope ids', () => {
 describe('caller identity scopes', () => {
   it('includes session, agent, project, team, and global in order', () => {
     const scopes = scopesForIdentity(
-      { sessionId: 's1', agentId: 'a1', projectId: '/project', teamId: 'team' },
+      { sessionId: 's1', principalId: 'p1', agentId: 'a1', projectId: '/project', teamId: 'team' },
       config,
     )
     expect(scopes.map((scope) => scope.scope)).toEqual([
       'session',
       'agent',
+      'user',
       'project',
       'team',
       'global',
@@ -85,15 +91,20 @@ describe('caller identity scopes', () => {
   })
 
   it('extracts a structural agent session id', () => {
-    expect(identityFromAgent({ session: { id: 's1' } })).toEqual({ sessionId: 's1', agentId: 's1' })
+    expect(identityFromAgent({ session: { id: 's1' } })).toEqual({ sessionId: 's1' })
+    expect(
+      identityFromAgent({ session: { id: 's1', header: { agentPreset: 'worker' } } }),
+    ).toEqual({ sessionId: 's1', agentPreset: 'worker' })
     expect(identityFromAgent({})).toEqual({})
     expect(identityFromAgent(undefined)).toEqual({})
   })
 
   it('resolves model-supplied scope names only within caller scopes', () => {
-    const identity = { sessionId: 's1' }
+    const identity = { sessionId: 's1', principalId: 'p1' }
     expect(scopeFromName('session', identity, config)).toEqual(makeScopeRef('session', 's1'))
+    expect(scopeFromName('user', identity, config)).toEqual(makeScopeRef('user', 'p1'))
     expect(scopeFromName('global', identity, config)).toEqual(globalScope())
+    expect(() => scopeFromName('global', identity, parseConfig({}))).toThrow(/not enabled/)
     expect(() => scopeFromName('tenant', identity, config)).toThrow(/scope must be one of/)
     expect(() => scopeFromName('team', { sessionId: 's1' }, parseConfig({}))).toThrow(/FORBIDDEN|no team/)
   })

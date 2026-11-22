@@ -87,7 +87,15 @@ export class CogneeRestAdapter implements MemoryAdapter {
     })
   }
 
+  /** Authenticated Cognee user behind the API key; used for stable namespaces. */
+  async probePrincipal(): Promise<string | undefined> {
+    return this.registry.currentUserId()
+  }
+
   async remember(input: RememberInput): Promise<RememberResult> {
+    if (input.scope.scope === 'session') {
+      throw new MemoryError('VALIDATION', 'session memory is ephemeral and never written to Cognee')
+    }
     const nowIso = new Date(this.now()).toISOString()
     const dataset = await this.registry.ensure(input.scope, input.signal)
     const before = await this.listDataIds(dataset.id, input.signal)
@@ -149,10 +157,17 @@ export class CogneeRestAdapter implements MemoryAdapter {
     const scopeByDatasetId = new Map<string, ScopeRef>()
     const datasetIds: string[] = []
     for (const scope of query.scopes) {
+      if (scope.scope === 'session') continue
       const dataset = await this.registry.lookup(scope, query.signal)
-      if (dataset === undefined) continue
-      datasetIds.push(dataset.id)
-      scopeByDatasetId.set(dataset.id, scope)
+      if (dataset !== undefined) {
+        datasetIds.push(dataset.id)
+        scopeByDatasetId.set(dataset.id, scope)
+      }
+      const legacy = await this.registry.lookupLegacy(scope, query.signal)
+      if (legacy !== undefined && !datasetIds.includes(legacy.id)) {
+        datasetIds.push(legacy.id)
+        scopeByDatasetId.set(legacy.id, scope)
+      }
     }
     // Read paths never create datasets: an empty scope is simply empty.
     if (datasetIds.length === 0) return []

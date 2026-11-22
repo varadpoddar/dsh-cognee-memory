@@ -4,14 +4,17 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
 
-/** The five memory scopes, broadest last. */
-export const MEMORY_SCOPES = ['session', 'agent', 'project', 'team', 'global'] as const
+/** The six memory scopes, narrowest first; global is opt-in only. */
+export const MEMORY_SCOPES = ['session', 'agent', 'user', 'project', 'team', 'global'] as const
 export type MemoryScope = (typeof MEMORY_SCOPES)[number]
 
 /** One stable, backend-safe scope identity. `id` never contains the raw session id. */
 export interface ScopeRef {
   readonly scope: MemoryScope
+  /** Deterministic namespace segment; never a DSH session id for durable scopes. */
   readonly id: string
+  /** M1 dataset name kept for read-only compatibility; never used for new writes. */
+  readonly legacyName?: string
 }
 
 /** Where a memory came from. Only authoritative evidence kinds are accepted for writes. */
@@ -111,19 +114,28 @@ export interface MemoryAdapter {
   forget(input: ForgetInput): Promise<ForgetResult>
   status(signal?: AbortSignal): Promise<AdapterStatus>
   health(): Promise<HealthResult>
+  /** Authenticated Cognee user behind the API key, when the transport can read it. */
+  probePrincipal?(): Promise<string | undefined>
 }
 
 /** Caller identity available at a tool call or hook boundary. */
 export interface CallerIdentity {
   readonly sessionId?: string
+  /** Authenticated principal id from the deployment/Cognee identity, never model text. */
+  readonly principalId?: string
   readonly agentId?: string
+  /** Agent preset from the committed session header, never the session id. */
+  readonly agentPreset?: string
   readonly projectId?: string
   readonly teamId?: string
 }
 
 /** Structural view of a DSH agent; avoids a hard import of the host package. */
 export interface AgentLike {
-  readonly session?: { readonly id?: unknown }
+  readonly session?: {
+    readonly id?: unknown
+    readonly header?: { readonly agentPreset?: unknown }
+  }
 }
 
 /** Minimal model-facing content block accepted by DSH tool renderers. */

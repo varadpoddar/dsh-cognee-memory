@@ -31,7 +31,7 @@ export function textBlock(text: string): TextContentBlock[] {
   return [{ type: 'text', text }]
 }
 
-export const SCOPE_VALUES = ['session', 'agent', 'project', 'team', 'global'] as const
+export const SCOPE_VALUES = ['session', 'agent', 'user', 'project', 'team', 'global'] as const
 
 /** Raw JSON Schema for a ScopeRef value (DSH-supported keyword subset only). */
 export const scopeValueSchema = {

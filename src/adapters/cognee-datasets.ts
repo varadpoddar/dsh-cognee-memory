@@ -1,6 +1,6 @@
 import { MemoryError } from '../errors.js'
 import type { CogneeMemoryConfig } from '../config/schema.js'
-import { scopeKey } from '../memory/scopes.js'
+import { legacyScopeKey, scopeKey } from '../memory/scopes.js'
 import type { ScopeRef } from '../types.js'
 import { COGNEE_PATHS } from './cognee-paths.js'
 import { isRecord, pickString } from './cognee-response.js'
@@ -94,12 +94,30 @@ export class DatasetRegistry {
 
   /** Look up an existing dataset for a scope without creating anything. */
   async lookup(scope: ScopeRef, signal?: AbortSignal): Promise<CogneeDataset | undefined> {
-    const name = scopeKey(scope)
+    return this.lookupByName(scopeKey(scope), true, signal)
+  }
+
+  /**
+   * Read-only M1 dataset lookup. Namespaces changed in Milestone 2, but the
+   * verified fixture and any earlier memories remain readable; new writes
+   * always target the current namespace.
+   */
+  async lookupLegacy(scope: ScopeRef, signal?: AbortSignal): Promise<CogneeDataset | undefined> {
+    const legacy = legacyScopeKey(scope)
+    if (legacy === undefined || legacy === scopeKey(scope)) return undefined
+    return this.lookupByName(legacy, false, signal)
+  }
+
+  private async lookupByName(
+    name: string,
+    assertOwner: boolean,
+    signal?: AbortSignal,
+  ): Promise<CogneeDataset | undefined> {
     const cached = this.byName.get(name)
     if (cached !== undefined && this.now() - cached.fetchedAt < this.cacheMs) return cached.dataset
     const listed = (await this.list(signal)).find((dataset) => dataset.name === name)
     if (listed === undefined) return undefined
-    await this.assertOwned(listed, signal)
+    if (assertOwner) await this.assertOwned(listed, signal)
     this.byName.set(name, { dataset: listed, fetchedAt: this.now() })
     return listed
   }

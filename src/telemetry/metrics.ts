@@ -7,6 +7,13 @@ export type MetricName =
   | 'remember.requests'
   | 'remember.failures'
   | 'remember.deduplicated'
+  | 'remember.ephemeral'
+  | 'extraction.candidates'
+  | 'extraction.queued'
+  | 'extraction.ingested'
+  | 'extraction.failed'
+  | 'extraction.llm.requests'
+  | 'extraction.llm.failures'
   | 'forget.requests'
   | 'forget.unsupported'
   | 'redaction.blocked'
@@ -30,6 +37,13 @@ const METRIC_NAMES: readonly MetricName[] = [
   'remember.requests',
   'remember.failures',
   'remember.deduplicated',
+  'remember.ephemeral',
+  'extraction.candidates',
+  'extraction.queued',
+  'extraction.ingested',
+  'extraction.failed',
+  'extraction.llm.requests',
+  'extraction.llm.failures',
   'forget.requests',
   'forget.unsupported',
   'redaction.blocked',

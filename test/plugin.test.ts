@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '@deepseek-ai/cordis'
 import { apply, Config, name, inject } from '../src/index.js'
+import { parseConfig } from '../src/config/schema.js'
 import type { JsonValue } from '../src/types.js'
 import { createFakePluginContext } from './helpers/fake-context.js'
 
@@ -124,9 +125,40 @@ describe('plugin entry', () => {
       'agent/disposed',
       'agent/inbox/claimed',
       'agent/pre-step',
+      'session/disposed',
+      'session/event',
       'system-prompt/assemble',
     ])
     expect(typeof dispose).toBe('function')
+  })
+
+  it('keeps automatic extraction active when every memory tool is disabled', () => {
+    const fake = createFakePluginContext()
+    const dispose = apply(fake.ctx, {
+      transport: 'rest',
+      apiBaseUrl: 'http://127.0.0.1:9',
+      tools: { enabled: false },
+    })
+    expect(fake.tools).toHaveLength(0)
+    expect(fake.listeners.map((entry) => entry.name).sort()).toEqual([
+      'agent/created',
+      'agent/disposed',
+      'agent/inbox/claimed',
+      'agent/pre-step',
+      'session/disposed',
+      'session/event',
+      'system-prompt/assemble',
+    ])
+    expect(typeof dispose).toBe('function')
+  })
+
+  it('ships safe namespace and extraction defaults', () => {
+    const config = parseConfig({})
+    expect(config.scopes.allowGlobal).toBe(false)
+    expect(config.scopes.defaultWriteScope).toBe('project')
+    expect(config.extraction.enabled).toBe(true)
+    expect(config.extraction.deterministic).toBe(true)
+    expect(config.extraction.llm.enabled).toBe(false)
   })
 
   it('declares only the JSON Schema subset accepted by DSH 0.2.1-rc.5', () => {

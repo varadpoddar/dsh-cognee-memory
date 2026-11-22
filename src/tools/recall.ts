@@ -132,7 +132,7 @@ export function createRecallTool(deps: RecallToolDependencies): ToolDefinitionLi
           if (scope === undefined) {
             throw new MemoryError('FORBIDDEN', `caller has no ${args.scope} memory scope`)
           }
-          const policy = deps.coordinator.policyFor(identity)
+          const policy = await deps.coordinator.policyFor(identity)
           if (!policy.canRead(scope)) {
             throw new MemoryError('FORBIDDEN', `memory scope ${scope.scope} is not accessible`)
           }

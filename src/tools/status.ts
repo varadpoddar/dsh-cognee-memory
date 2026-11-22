@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { CogneeMemoryConfig } from '../config/schema.js'
 import type { MemoryCoordinator } from '../memory/coordinator.js'
+import type { ExtractionSnapshot } from '../memory/extraction-service.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type { JsonValue, ToolDefinitionLike, ToolRunContextLike } from '../types.js'
 import { parseToolArgs, rethrowToolError, textBlock } from './shared.js'
@@ -9,6 +10,7 @@ export interface StatusToolDependencies {
   readonly coordinator: Pick<MemoryCoordinator, 'status'>
   readonly config: CogneeMemoryConfig
   readonly metrics?: Metrics
+  readonly extraction?: { status(): Promise<ExtractionSnapshot> }
 }
 
 const argsSchema = z.object({}).strict()
@@ -79,6 +81,8 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
             `auth: ${typed.authMode}`,
             `failure mode: ${typed.failureMode}`,
             countSummary(typed.counters),
+            `memory namespaces: ${JSON.stringify((typed.details as { namespaces?: unknown }).namespaces ?? {})}`,
+            `extraction: ${JSON.stringify((typed.details as { extraction?: unknown }).extraction ?? {})}`,
           ].join('\n'),
         )
       },
@@ -87,6 +91,10 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
       try {
         parseToolArgs(argsSchema, rawArgs)
         const status = await deps.coordinator.status(exec.signal)
+        const extraction =
+          deps.extraction === undefined
+            ? undefined
+            : ((await deps.extraction.status()) as unknown as JsonValue)
         return {
           enabled: deps.config.enabled,
           transport: status.transport,
@@ -95,7 +103,11 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
           authMode: status.authMode,
           failureMode: status.failureMode,
           counters: status.metrics.counters,
-          details: status.adapter.details ?? {},
+          details: {
+            ...(status.adapter.details ?? {}),
+            ...(status.namespaces === undefined ? {} : { namespaces: status.namespaces as JsonValue }),
+            ...(extraction === undefined ? {} : { extraction }),
+          },
         }
       } catch (error) {
         rethrowToolError(error)

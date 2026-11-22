@@ -15,6 +15,8 @@ import { createMemoryAdapter } from './adapters/memory-adapter.js'
 import { MemoryCoordinator } from './memory/coordinator.js'
 import { Metrics } from './telemetry/metrics.js'
 import { registerAgentLifecycle } from './hooks/agent-lifecycle.js'
+import { registerSessionExtraction } from './hooks/session-events.js'
+import { ExtractionService } from './memory/extraction-service.js'
 import { SettingsStore, resolveSettingsPath } from './settings/store.js'
 import { registerSettingsRoutes } from './settings/http.js'
 import { createRecallTool } from './tools/recall.js'
@@ -51,6 +53,16 @@ export { validateCogneeUrl } from './settings/url.js'
 export { MemoryError, UnsupportedOperationError, RedactionBlockedError } from './errors.js'
 export { MemoryPromptContext } from './hooks/prompt-context.js'
 export { TaskLifecycleRecorder } from './hooks/task-lifecycle.js'
+export { ExtractionService } from './memory/extraction-service.js'
+export { CandidateQueue } from './memory/candidate-queue.js'
+export {
+  extractDeterministicCandidates,
+  extractWithLlm,
+  assertPrivateEndpoint,
+  semanticKeyFor,
+} from './memory/extraction.js'
+export { IdentityResolver, PRINCIPAL_ENV } from './memory/identity.js'
+export { EphemeralSessionMemory } from './memory/ephemeral.js'
 export { createMemoryAdapter } from './adapters/memory-adapter.js'
 
 /**
@@ -101,6 +113,12 @@ export function apply(
 
   disposers.push(registerAgentLifecycle(ctx, { coordinator, config, metrics }))
 
+  // Automatic extraction runs independently of tools. It watches the
+  // post-commit session feed, so `tools.enabled: false` changes nothing here.
+  const extraction = new ExtractionService({ coordinator, config, metrics })
+  disposers.push(registerSessionExtraction(ctx, { extraction, metrics }))
+  void extraction.start().catch(() => metrics.increment('extraction.failed'))
+
   // Present only where the profile mounts dsh-host-webserver (the shipped `web`
   // profile does; `headless` does not). Tools and prompt context still apply.
   // Routes are mounted through a nested `ctx.inject`, the idiom DSH's own
@@ -136,7 +154,7 @@ export function apply(
       createRecallTool({ coordinator, config, metrics }),
       createRememberTool({ coordinator, config, metrics }),
       createForgetTool({ coordinator, config, metrics }),
-      createStatusTool({ coordinator, config, metrics }),
+      createStatusTool({ coordinator, config, metrics, extraction }),
     ]
     for (const definition of tools) {
       disposers.push(ctx.tools.register(definition))

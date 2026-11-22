@@ -81,7 +81,7 @@ describe('RecallService', () => {
       return []
     })
     await service.recall({ text: 'query', identity: identity() })
-    expect(seen.map((scope) => scope.scope)).toEqual(['session', 'agent', 'project', 'global'])
+    expect(seen.map((scope) => scope.scope)).toEqual(['agent', 'project'])
   })
 
   it('rejects empty queries and disabled memory', async () => {

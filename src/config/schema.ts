@@ -104,11 +104,65 @@ export const CogneeMemoryConfigSchema = z
       })
       .prefault({}),
 
+    /**
+     * Deployment identity. `principalId` is trusted configuration, never model
+     * text; when omitted the plugin uses the authenticated Cognee user behind
+     * the API key. `agentId` is the stable agent namespace when the committed
+     * session header has no `agentPreset`.
+     */
+    identity: z
+      .object({
+        principalId: nonEmpty.optional(),
+        agentId: nonEmpty.optional(),
+      })
+      .prefault({}),
+
     /** Optional identities used to derive project/team scope ids. */
     scopeDefaults: z
       .object({
         projectId: nonEmpty.optional(),
         teamId: nonEmpty.optional(),
+      })
+      .prefault({}),
+
+    /**
+     * Namespace policy. Global memory is deny-by-default and requires the
+     * deployment to opt in. Session memory is always ephemeral and never
+     * reaches Cognee or any other durable backend.
+     */
+    scopes: z
+      .object({
+        allowGlobal: z.boolean().default(false),
+        defaultWriteScope: z.enum(['agent', 'user', 'project', 'team']).default('project'),
+      })
+      .prefault({}),
+
+    /**
+     * Automatic extraction from committed session events. Deterministic
+     * commands ("remember that…", "forget…", "actually it's…") never depend on
+     * a model. The optional LLM pass is disabled by default and may only target
+     * a private/local endpoint.
+     */
+    extraction: z
+      .object({
+        enabled: z.boolean().default(true),
+        deterministic: z.boolean().default(true),
+        scope: z.enum(['agent', 'user', 'project', 'team']).default('project'),
+        llm: z
+          .object({
+            enabled: z.boolean().default(false),
+            endpoint: httpUrl.default('http://10.20.10.40:8888/v1'),
+            model: nonEmpty.default('unsloth/Qwen3.8-27B-GGUF'),
+            timeoutMs: z.number().int().min(500).max(120_000).default(15_000),
+            maxCandidates: z.number().int().min(1).max(10).default(3),
+          })
+          .prefault({}),
+        queue: z
+          .object({
+            dir: nonEmpty.optional(),
+            maxPending: z.number().int().min(1).max(10_000).default(100),
+          })
+          .prefault({}),
       })
       .prefault({}),
 

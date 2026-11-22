@@ -15,8 +15,10 @@ import type {
 import { buildAccessPolicy, type AccessPolicy } from '../security/access-policy.js'
 import { safeEndpoint } from '../security/secrets.js'
 import { DedupIndex, findNearDuplicate } from './deduplication.js'
+import { EphemeralSessionMemory } from './ephemeral.js'
+import { IdentityResolver } from './identity.js'
 import { RecallService, type RecallRequest } from './recall.js'
-import { sameScope, scopeFromName, scopesForIdentity } from './scopes.js'
+import { scopeFromName, sameScope, scopesForIdentity } from './scopes.js'
 import { evaluateWrite } from './write-policy.js'
 
 export interface CoordinatorDependencies {
@@ -27,6 +29,8 @@ export interface CoordinatorDependencies {
   readonly clock?: () => Date
   /** Live Cognee endpoint source; see `HttpJsonClientOptions.endpoint`. */
   readonly endpoint?: () => string
+  readonly identityResolver?: IdentityResolver
+  readonly ephemeral?: EphemeralSessionMemory
 }
 
 export interface RememberRequest {
@@ -35,6 +39,8 @@ export interface RememberRequest {
   readonly scopeName?: string
   readonly tags?: readonly string[]
   readonly provenance: Provenance
+  /** Caller-supplied stable idempotency key (extraction pipeline); never model prose. */
+  readonly dedupeKey?: string
   readonly signal?: AbortSignal
 }
 
@@ -51,6 +57,12 @@ export interface CoordinatorStatus {
   readonly endpoint: string
   readonly authMode: string
   readonly failureMode: string
+  readonly namespaces: Readonly<Record<string, string>>
+  readonly scopes: {
+    readonly allowGlobal: boolean
+    readonly defaultWriteScope: string
+    readonly session: string
+  }
   readonly metrics: ReturnType<Metrics['snapshot']>
 }
 
@@ -80,6 +92,8 @@ export class MemoryCoordinator {
   private readonly clock: () => Date
   readonly endpointSource: (() => string) | undefined
   private readonly dedup = new DedupIndex()
+  readonly identityResolver: IdentityResolver
+  private readonly ephemeral: EphemeralSessionMemory
 
   constructor(dependencies: CoordinatorDependencies) {
     this.adapter = dependencies.adapter
@@ -88,9 +102,24 @@ export class MemoryCoordinator {
     this.cwd = dependencies.cwd
     this.clock = dependencies.clock ?? (() => new Date())
     this.endpointSource = dependencies.endpoint
-    this.recallService = new RecallService(dependencies, {
-      ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
-    })
+    this.ephemeral = dependencies.ephemeral ?? new EphemeralSessionMemory(() => this.clock())
+    this.identityResolver =
+      dependencies.identityResolver ??
+      new IdentityResolver({
+        config: this.config,
+        adapter: this.adapter,
+        ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
+      })
+    this.recallService = new RecallService(
+      {
+        adapter: this.adapter,
+        config: this.config,
+        metrics: this.metrics,
+        identityResolver: this.identityResolver,
+        ephemeral: this.ephemeral,
+      },
+      { ...(this.cwd === undefined ? {} : { cwd: this.cwd }) },
+    )
   }
 
   /**
@@ -101,12 +130,21 @@ export class MemoryCoordinator {
     return this.endpointSource?.() ?? this.config.apiBaseUrl
   }
 
-  policyFor(identity: CallerIdentity): AccessPolicy {
-    return buildAccessPolicy(scopesForIdentity(identity, this.config, this.cwd))
+  async resolveIdentity(identity: CallerIdentity): Promise<CallerIdentity> {
+    return this.identityResolver.resolve(identity)
   }
 
-  resolveScope(identity: CallerIdentity, scopeName?: string): ScopeRef {
-    const scope = scopeFromName(scopeName ?? 'project', identity, this.config)
+  async policyFor(identity: CallerIdentity): Promise<AccessPolicy> {
+    return buildAccessPolicy(await this.identityResolver.scopes(identity))
+  }
+
+  async resolveScope(identity: CallerIdentity, scopeName?: string): Promise<ScopeRef> {
+    const resolved = await this.identityResolver.resolve(identity)
+    const scope = scopeFromName(
+      scopeName ?? this.config.scopes.defaultWriteScope,
+      resolved,
+      this.config,
+    )
     if (scope === undefined) {
       throw new MemoryError('FORBIDDEN', 'caller has no memory scope')
     }
@@ -114,8 +152,9 @@ export class MemoryCoordinator {
   }
 
   async remember(request: RememberRequest): Promise<RememberResult> {
-    const scope = this.resolveScope(request.identity, request.scopeName)
-    const policy = this.policyFor(request.identity)
+    const identity = await this.identityResolver.resolve(request.identity)
+    const scope = await this.resolveScope(identity, request.scopeName)
+    const policy = await this.policyFor(identity)
     const decision = evaluateWrite({
       text: request.text,
       scope,
@@ -127,6 +166,19 @@ export class MemoryCoordinator {
 
     this.metrics?.increment('remember.requests')
     try {
+      if (scope.scope === 'session') {
+        const sessionId = request.provenance.sessionId ?? identity.sessionId
+        if (sessionId === undefined || sessionId === '') {
+          throw new MemoryError('VALIDATION', 'session memory requires a session id')
+        }
+        this.metrics?.increment('remember.ephemeral')
+        return this.ephemeral.remember({
+          text: decision.text,
+          scope,
+          provenance: { ...request.provenance, sessionId },
+          ...(request.tags === undefined ? {} : { tags: request.tags }),
+        })
+      }
       const threshold = this.config.dedup.nearDuplicateThreshold
       const local = this.dedup.findNear(scope, decision.text, threshold)
       if (local !== undefined) {
@@ -179,11 +231,11 @@ export class MemoryCoordinator {
         text: decision.text,
         scope,
         provenance: request.provenance,
-        dedupeKey: decision.dedupeKey,
+        dedupeKey: request.dedupeKey ?? decision.dedupeKey,
         ...(tags === undefined ? {} : { tags }),
         ...(request.signal === undefined ? {} : { signal: request.signal }),
         metadata: {
-          dedupeKey: decision.dedupeKey,
+          dedupeKey: request.dedupeKey ?? decision.dedupeKey,
           provenanceKind: request.provenance.kind,
           ...(decision.redacted ? { redacted: true } : {}),
         },
@@ -202,13 +254,72 @@ export class MemoryCoordinator {
     return this.recallService.recall(request)
   }
 
+  /**
+   * Deterministic "forget …" command. It recalls candidates in the caller's
+   * chosen scope and forgets only exact scope matches, never another caller's
+   * memory. Backends that cannot address synthetic ids simply report nothing
+   * forgotten.
+   */
+  async forgetByText(request: {
+    readonly text: string
+    readonly identity: CallerIdentity
+    readonly scopeName?: string
+    readonly signal?: AbortSignal
+  }): Promise<{ forgotten: number; ids: readonly string[] }> {
+    const text = request.text.trim()
+    if (text === '') return { forgotten: 0, ids: [] }
+    const identity = await this.identityResolver.resolve(request.identity)
+    const scope = await this.resolveScope(identity, request.scopeName)
+    ;(await this.policyFor(identity)).assertWritable(scope)
+    if (scope.scope === 'session') {
+      if (identity.sessionId === undefined) return { forgotten: 0, ids: [] }
+      const ids = this.ephemeral.forgetByText(identity.sessionId, scope, text)
+      return { forgotten: ids.length, ids }
+    }
+    const hits = await this.recallService.recall({
+      text,
+      identity,
+      limit: 10,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    })
+    const ids: string[] = []
+    for (const hit of hits) {
+      if (!sameScope(hit.record.scope, scope)) continue
+      if (!hit.record.id.startsWith('mem-') && !/^[0-9a-f-]{36}$/i.test(hit.record.id)) continue
+      try {
+        const result = await this.adapter.forget({
+          id: hit.record.id,
+          scope,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        })
+        if (result.forgotten) ids.push(hit.record.id)
+      } catch {
+        // A single failed deletion does not abort the rest of the command.
+      }
+      if (ids.length >= 5) break
+    }
+    return { forgotten: ids.length, ids }
+  }
+
   async forget(request: ForgetRequest): Promise<{ id: string; scope: ScopeRef; forgotten: boolean }> {
     const id = request.id.trim()
     if (id === '') throw new MemoryError('VALIDATION', 'memory id must not be empty')
-    const scope = this.resolveScope(request.identity, request.scopeName)
-    this.policyFor(request.identity).assertWritable(scope)
+    const identity = await this.identityResolver.resolve(request.identity)
+    const scope = await this.resolveScope(identity, request.scopeName)
+    ;(await this.policyFor(identity)).assertWritable(scope)
     this.metrics?.increment('forget.requests')
     try {
+      if (scope.scope === 'session') {
+        const sessionId = identity.sessionId
+        if (sessionId === undefined) {
+          throw new MemoryError('VALIDATION', 'session memory requires a session id')
+        }
+        return this.ephemeral.forget(sessionId, {
+          id,
+          scope,
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        })
+      }
       const result = await this.adapter.forget({
         id,
         scope,
@@ -239,6 +350,12 @@ export class MemoryCoordinator {
       endpoint: safeEndpoint(this.activeEndpoint()),
       authMode: this.config.authMode,
       failureMode: this.config.failureMode,
+      namespaces: await this.identityResolver.namespaces(),
+      scopes: {
+        allowGlobal: this.config.scopes.allowGlobal,
+        defaultWriteScope: this.config.scopes.defaultWriteScope,
+        session: 'ephemeral',
+      },
       metrics: this.metrics?.snapshot() ?? { counters: {} },
     }
   }

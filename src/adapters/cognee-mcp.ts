@@ -140,7 +140,14 @@ export class CogneeMcpAdapter implements MemoryAdapter {
     this.metrics = runtime.metrics
   }
 
+  async probePrincipal(): Promise<string | undefined> {
+    return undefined
+  }
+
   async remember(input: RememberInput): Promise<RememberResult> {
+    if (input.scope.scope === 'session') {
+      throw new Error('session memory is ephemeral and never written to Cognee')
+    }
     const payload = await this.callTool(
       COGNEE_MCP_TOOLS.remember,
       {
