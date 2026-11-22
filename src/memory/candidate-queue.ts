@@ -204,6 +204,23 @@ export class CandidateQueue {
     }
   }
 
+  /** Record one candidate's outcome without performing the write itself. */
+  async recordOutcome(
+    candidate: Pick<MemoryCandidate, 'id' | 'idempotencyKey'>,
+    status: QueueStatus,
+    errorCode?: string,
+  ): Promise<void> {
+    await this.ensureDir()
+    await this.append({
+      type: 'result',
+      id: candidate.id,
+      idempotencyKey: candidate.idempotencyKey,
+      status,
+      at: new Date(this.now()).toISOString(),
+      ...(errorCode === undefined ? {} : { errorCode }),
+    })
+  }
+
   /** Drain in order with one in-flight candidate; failures stay recorded and do not block later work. */
   async drain(
     sink: (candidate: MemoryCandidate) => Promise<{ status: QueueStatus; errorCode?: string }>,
@@ -216,18 +233,10 @@ export class CandidateQueue {
       let failed = 0
       for (const candidate of queued) {
         processed += 1
-        const at = new Date(this.now()).toISOString()
         try {
           const result = await sink(candidate)
           if (result.status === 'ingested') ingested += 1
-          await this.append({
-            type: 'result',
-            id: candidate.id,
-            idempotencyKey: candidate.idempotencyKey,
-            status: result.status,
-            at,
-            ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
-          })
+          await this.recordOutcome(candidate, result.status, result.errorCode)
         } catch (error) {
           failed += 1
           const code = isMemoryError(error)
@@ -235,14 +244,7 @@ export class CandidateQueue {
             : error instanceof MemoryError
               ? error.code
               : 'INTERNAL'
-          await this.append({
-            type: 'result',
-            id: candidate.id,
-            idempotencyKey: candidate.idempotencyKey,
-            status: 'failed',
-            at,
-            errorCode: code,
-          })
+          await this.recordOutcome(candidate, 'failed', code)
         }
       }
       return { processed, ingested, failed }

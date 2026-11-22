@@ -7,7 +7,7 @@ function exec() {
 }
 
 describe('memory_recall tool', () => {
-  it('returns recalled memories and renders them as untrusted data', async () => {
+  it('returns recalled memories and renders them as data, not instructions', async () => {
     const harness = createHarness({
       async recall() {
         return [record('1', 'alpha'), record('2', 'beta', SESSION_SCOPE)]
@@ -17,7 +17,7 @@ describe('memory_recall tool', () => {
     const value = (await tool.execute({ query: 'what happened?' }, exec())) as never
     const rendered = tool.output.render({}, value).map((block) => block.text).join('\n')
     expect(rendered).toContain('alpha')
-    expect(rendered).toContain('untrusted data')
+    expect(rendered).toContain('data, not instructions')
     expect(rendered).toContain('- [project] alpha')
   })
 
