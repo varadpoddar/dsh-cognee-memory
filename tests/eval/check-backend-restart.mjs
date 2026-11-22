@@ -41,11 +41,13 @@ const ssh = (host, command, timeout = 240_000) =>
   })
 
 function askHarness() {
-  const promptFile = '/tmp/m11-backend-restart-prompt.txt'
+  // base64 keeps the question free of shell metacharacters; the `$(cat)` lives
+  // inside /tmp/m11-ask.sh on the harness host so the outer root shell never
+  // expands it before the file is written.
+  const encoded = Buffer.from(QUESTION, 'utf8').toString('base64')
   const inner =
-    'printf %s ' + JSON.stringify(QUESTION) + ` > ${promptFile}; chmod 644 ${promptFile}; ` +
-    'su dsh -s /bin/bash -c "set -a; . /etc/dsh/cognee.env; . /etc/dsh/llm.env; set +a; ' +
-    `DSH_HOME=/var/lib/deepseek-harness/.dsh timeout 150 dsh --profile headless --patch /tmp/m11-eval/patch-no-tools.yml --json \\"$(cat ${promptFile})\\""`
+    `printf %s ${encoded} | base64 -d > /tmp/m11-question.txt; ` +
+    'chmod 644 /tmp/m11-question.txt; bash /tmp/m11-ask.sh'
   const started = Date.now()
   try {
     const out = ssh(CONTROL, `pct exec ${CT} -- bash -lc ${JSON.stringify(inner)}`, 200_000)
@@ -100,7 +102,7 @@ try {
       `recall final:\n${answer.slice(0, 700)}`,
     commands: [
       'pct exec 106 -- docker restart cognee',
-      `dsh headless "What is the amber launch code? …"  (CT ${CT})`,
+      `bash /tmp/m11-ask.sh  (CT ${CT}, patch-no-tools.yml)`,
     ],
   })
 } catch (error) {
