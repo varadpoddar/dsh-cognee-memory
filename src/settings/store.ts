@@ -1,12 +1,14 @@
 /**
  * Persisted, runtime-editable Cognee settings.
  *
- * WHY A FILE: the installed DSH 0.2.1-rc.5 exposes `ctx.webServer.register`
- * (verified: `dsh-host-webserver/lib/types/index.d.ts:169-174`) but no
- * settings/config service and no third-party settings-page slot, so a plugin
- * cannot register a native settings section. The plugin therefore owns one JSON
- * file, re-reads it when its mtime/size changes, and serves a form over its own
- * authenticated routes (`./http.ts`).
+ * WHY A FILE: the installed DSH 0.2.1-rc.5 exposes no host-side settings/config
+ * service: `ctx.webServer.register` (`dsh-host-webserver/lib/types/index.d.ts:174`)
+ * is the host's only web extension point, and runtime configuration is not a
+ * service a plugin can provide into. The plugin therefore owns one JSON file,
+ * re-reads it when its mtime/size changes, and serves a form over its own
+ * authenticated routes (`./http.ts`). A native settings *section* would be a
+ * client-slot registration (`settings.section`, see docs/UI_INTEGRATION.md) and
+ * would not remove the need for this file.
  *
  * PRECEDENCE, highest first (asserted in `test/settings-store.test.ts`):
  *   1. stored setting   — the value an operator saved from the settings page

@@ -47,6 +47,7 @@ export type MetricName =
   | 'outbox.recovered'
   | 'task.recorded'
   | 'task.failed'
+  | 'provenance.record.failures'
 
 const METRIC_NAMES: readonly MetricName[] = [
   'recall.requests',
@@ -95,6 +96,7 @@ const METRIC_NAMES: readonly MetricName[] = [
   'outbox.recovered',
   'task.recorded',
   'task.failed',
+  'provenance.record.failures',
 ]
 
 /**

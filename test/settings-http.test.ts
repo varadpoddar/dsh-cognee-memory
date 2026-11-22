@@ -407,3 +407,50 @@ describe('settings toggles and inspection', () => {
     expect(called).toBe(0)
   })
 })
+
+describe('settings page provenance links', () => {
+  function inspection(): SettingsInspection {
+    return {
+      toggles: { autoRecall: true, autoWrite: true, sources: { apiBaseUrl: 'stored', mcpUrl: 'none', autoRecall: 'stored', autoWrite: 'stored' } },
+      scopes: { principal: 'operator', project: 'dsh-project-demo', defaultWriteScope: 'project', readable: [] },
+      candidates: { queued: 0, ingested: 0, failed: 0, total: 0, forgotten: 0, operations: [] },
+      ingestion: { succeeded: 0, failed: 0 },
+      recall: {
+        firstTurn: { attempts: 0, hits: 0, misses: 0, hitRate: 0 },
+        latency: { recall: { count: 0, p50: 0, p95: 0 }, prefetch: { count: 0, p50: 0, p95: 0 } },
+        contextTokens: { last: 0, p95: 0, total: 0 },
+      },
+      memory: { count: 1, datasets: [], checkedAt: '2026-01-01T00:00:00.000Z' },
+      memories: [
+        { id: 'mem-1', dataset: 'dsh-project-demo', state: 'indexed', preview: 'Release codename' },
+        { id: '<script>alert(1)</script>', dataset: 'dsh-project-demo', state: 'indexed', preview: 'hostile id' },
+      ],
+      stateCounts: Object.fromEntries(MEMORY_INSPECTION_STATES.map((state) => [state, 0])) as SettingsInspection['stateCounts'],
+      warnings: [],
+      inspectedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  it('links each memory to its token-protected provenance page when a token is on the request', async () => {
+    const env = { COGNEE_MEMORY_SETTINGS_TOKEN: TOKEN }
+    const h = harness({ env, inspect: async () => inspection() })
+    const response = await h.request(`${SETTINGS_PAGE_PATH}?token=${TOKEN}`, 'GET')
+    expect(response.status).toBe(200)
+    expect(response.body).toContain('/plugins/cognee-memory/memory/mem-1?token=')
+    expect(response.body).toContain('&amp;format=html')
+    expect(response.body).not.toContain('<script>')
+    // The hostile id is URL-encoded inside the link, never interpolated as markup.
+    expect(response.body).toContain('%3Cscript%3E')
+    expect(response.body).toContain('script-free provenance page')
+  })
+
+  it('renders no provenance link and no token in markup without a token', async () => {
+    const env = { COGNEE_MEMORY_SETTINGS_TOKEN: TOKEN }
+    const h = harness({ env, inspect: async () => inspection() })
+    const response = await h.request(SETTINGS_PAGE_PATH, 'GET', { authorization: `Bearer ${TOKEN}` })
+    expect(response.status).toBe(200)
+    expect(response.body).toContain('token required')
+    expect(response.body).not.toContain('/plugins/cognee-memory/memory/mem-1')
+    expect(response.body).not.toContain(TOKEN)
+  })
+})

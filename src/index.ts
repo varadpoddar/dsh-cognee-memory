@@ -21,6 +21,8 @@ import { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycl
 import { ExtractionService } from './memory/extraction-service.js'
 import { RecallVerificationLedger } from './memory/recall-verification.js'
 import { buildInspection } from './settings/inspect.js'
+import { ProvenanceIndex, resolveProvenancePath, type ProvenanceAccess } from './memory/provenance-index.js'
+import { registerProvenanceRoutes } from './settings/provenance-http.js'
 import { SettingsStore, resolveSettingsPath } from './settings/store.js'
 import { registerSettingsRoutes } from './settings/http.js'
 import { createRecallTool } from './tools/recall.js'
@@ -62,6 +64,26 @@ export { CandidateQueue } from './memory/candidate-queue.js'
 export { Outbox } from './memory/outbox.js'
 export { RetrievalCoordinator } from './memory/retrieval.js'
 export { RecallVerificationLedger } from './memory/recall-verification.js'
+export {
+  ProvenanceIndex,
+  resolveProvenancePath,
+  isAddressableMemoryId,
+  PROVENANCE_FILE_ENV,
+  PROVENANCE_MAX_ENTRIES,
+  type ProvenanceEntry,
+  type ProvenanceAccess,
+  type ProvenanceIngestState,
+} from './memory/provenance-index.js'
+export {
+  registerProvenanceRoutes,
+  provenanceView,
+  deepLinkFor,
+  PROVENANCE_PATH_PREFIX,
+  MEMORIES_JSON_PATH,
+  COGNEE_UI_BASE_URL_ENV,
+  DEFAULT_COGNEE_UI_BASE_URL,
+  type MemoryProvenanceView,
+} from './settings/provenance-http.js'
 export {
   buildInspection,
   MEMORY_INSPECTION_STATES,
@@ -107,7 +129,10 @@ export function apply(
 
   const metrics = new Metrics()
   const adapter = createMemoryAdapter({ config, metrics, env: process.env, endpoint })
-  const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint })
+  // Bounded, metadata-only provenance for the authenticated detail view. It
+  // never holds a credential; a failure to read or write it never fails recall.
+  const provenance = new ProvenanceIndex({ filePath: resolveProvenancePath(process.env) })
+  const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint, provenanceIndex: provenance })
   // Bounded, read-only record of ids a recall actually returned; feeds the
   // settings page's `recall-verified` state.
   const verification = new RecallVerificationLedger()
@@ -171,15 +196,35 @@ export function apply(
       verification,
     })
 
+  // The detail route authorizes exactly like recall: the operator identity and
+  // its readable scopes come from the same coordinator policy. A failure to
+  // resolve them yields no readable scopes, so the route answers 404.
+  const provenanceAccess = async (): Promise<ProvenanceAccess> => {
+    const identity = await coordinator.resolveIdentity({})
+    const policy = await coordinator.policyFor({})
+    return {
+      ...(identity.principalId === undefined ? {} : { principalId: identity.principalId }),
+      readableScopes: policy.readableScopes,
+    }
+  }
+
+  const mountWebRoutes = (webServer: WebServerLike): void => {
+    for (const disposeRoutes of registerSettingsRoutes(webServer, { store: settings, inspect })) {
+      disposers.push(disposeRoutes)
+    }
+    for (const disposeRoutes of registerProvenanceRoutes(webServer, {
+      index: provenance,
+      store: settings,
+      access: provenanceAccess,
+    })) {
+      disposers.push(disposeRoutes)
+    }
+  }
+
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer'], (webCtx) => {
       if (disposed) return
-      for (const disposeRoutes of registerSettingsRoutes(webCtx.webServer as WebServerLike, {
-        store: settings,
-        inspect,
-      })) {
-        disposers.push(disposeRoutes)
-      }
+      mountWebRoutes(webCtx.webServer as WebServerLike)
     })
   } else {
     let webServer: WebServerLike | undefined
@@ -188,11 +233,7 @@ export function apply(
     } catch {
       webServer = undefined
     }
-    if (webServer !== undefined) {
-      for (const disposeRoutes of registerSettingsRoutes(webServer, { store: settings, inspect })) {
-        disposers.push(disposeRoutes)
-      }
-    }
+    if (webServer !== undefined) mountWebRoutes(webServer)
   }
 
   if (config.tools.enabled) {

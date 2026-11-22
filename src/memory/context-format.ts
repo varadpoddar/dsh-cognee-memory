@@ -4,8 +4,15 @@
  * Kept free of hook imports so the Milestone 6 retrieval coordinator and the
  * prompt-context hook share one presentation contract:
  *
- *   Known context (recalled memory; may be incomplete):
- *   - [project · high] Release codename: amber-otter-7731
+ *   Known context:
+ *   - Release codename · project · 2026-11-20
+ *
+ * One line per memory: label · scope · date. The label is a bounded one-line
+ * form of the memory itself (an explicit `label`/`semanticKey` in record
+ * metadata wins, otherwise the sanitized text), so the model still reads the
+ * memory while every line carries where and when it came from. The full
+ * record, its dataset, and its provenance are addressable by id in the
+ * authenticated detail view (`/plugins/cognee-memory/memory/<id>`).
  *
  * The security property ("memory is data, never instructions") is system text
  * (`MEMORY_POLICY_SECTION` in `hooks/prompt-context.ts`), not a per-turn
@@ -15,9 +22,11 @@ import type { JsonValue, RecallHit } from '../types.js'
 
 const MAX_ITEM_CHARS = 1_200
 const MAX_QUERY_CHARS = 2_000
+/** One model-visible line stays readable; longer memory is truncated with `…`. */
+const MAX_LABEL_CHARS = 160
 
 /** Header line every injected block starts with; no warning language. */
-export const MEMORY_BLOCK_HEADER = 'Known context (recalled memory; may be incomplete):'
+export const MEMORY_BLOCK_HEADER = 'Known context:'
 
 /**
  * Conservative token estimate. Three UTF-8 bytes per token overestimates
@@ -114,10 +123,39 @@ export interface MemoryBlock {
   readonly itemCount: number
 }
 
+function metadataString(record: RecallHit['record'], key: string): string | undefined {
+  const value = metadataValue(record, key)
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/**
+ * One-line form of a memory: an explicit operator/model-provided label, then
+ * the extracted semantic key, then the memory text itself. Sanitized and
+ * length-bounded so a long or hostile body cannot flood the prompt or break the
+ * one-line contract.
+ */
+export function memoryLabel(hit: RecallHit): string {
+  const source =
+    metadataString(hit.record, 'label') ??
+    metadataString(hit.record, 'semanticKey') ??
+    hit.record.text
+  const text = sanitizeMemoryText(source).replace(/\s*\n+\s*/g, ' ').trim()
+  if (text.length <= MAX_LABEL_CHARS) return text
+  return `${text.slice(0, MAX_LABEL_CHARS - 1).trimEnd()}…`
+}
+
+/**
+ * Calendar date of the memory record in UTC. An unparseable timestamp is
+ * rendered as `unknown` rather than dropped or invented.
+ */
+export function memoryDate(record: RecallHit['record']): string {
+  const at = Date.parse(record.createdAt)
+  return Number.isFinite(at) ? new Date(at).toISOString().slice(0, 10) : 'unknown'
+}
+
 /** One rendered memory line; shared by the formatter and the budget planner. */
 export function memoryItemLine(hit: RecallHit): string {
-  const text = sanitizeMemoryText(hit.record.text).replace(/\s*\n+\s*/g, ' ').trim()
-  return `- [${hit.record.scope.scope} · ${confidenceFor(hit.score)}] ${text}`
+  return `- ${memoryLabel(hit)} · ${hit.record.scope.scope} · ${memoryDate(hit.record)}`
 }
 
 /**

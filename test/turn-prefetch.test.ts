@@ -70,10 +70,10 @@ describe('prefetch budgets', () => {
     const cfg = config()
     const hits = Array.from({ length: 12 }, (_, index) => record(String(index), `memory ${index}`))
     const block = buildMemoryContextBlock(hits, cfg, cfg.prefetch)
-    expect(block.split('\n').filter((line) => line.startsWith('- ['))).toHaveLength(8)
-    expect(block).toContain('- [project · high] memory 7')
+    expect(block.split('\n').filter((line) => line.startsWith('- '))).toHaveLength(8)
+    expect(block).toContain('- memory 7 · project · 2026-01-01')
     expect(block).not.toContain('memory 8')
-    expect(block).toContain('Known context (recalled memory; may be incomplete):')
+    expect(block.split('\n')[0]).toBe('Known context:')
     expect(block).not.toContain('untrusted')
   })
 

@@ -1,34 +1,80 @@
 {
   "name": "dsh-cognee-memory",
-  "version": "0.1.0",
-  "description": "Persistent Cognee-backed memory for DeepSeek Harness agents (Phase 1 scaffold).",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Persistent Cognee-backed memory for DeepSeek Harness agents: bounded known-context recall, memory/remember/forget/status tools, a memory-provenance side panel, and an authenticated settings page.",
+  "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "memory",
+    "cognee",
+    "knowledge-graph",
+    "rag",
+    "provenance"
+  ],
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./src/*": "./src/*"
   },
   "files": [
     "lib",
+    "src",
+    "scripts",
+    "test",
+    "docs/ARCHITECTURE.md",
+    "docs/UI_INTEGRATION.md",
+    "docs/SETTINGS.md",
+    "tsconfig.json",
+    "tsconfig.build.json",
+    "vitest.config.ts",
+    "vitest.live.config.ts",
     "README.md",
-    "docs/ARCHITECTURE.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "dsh": "0.2.1-rc.5"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
   },
   "dependencies": {
     "zod": "^4.6.7"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5"
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.1-rc.5"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar-right": {
       "optional": true
     }
   },
@@ -39,10 +85,13 @@
     "vitest": "~3.2.7"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "check:client": "node scripts/build-client.mjs --check",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "vitest run --config vitest.live.config.ts"
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "prepack": "npm run build && npm run check:client"
   }
 }

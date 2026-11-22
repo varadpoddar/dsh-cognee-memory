@@ -65,9 +65,7 @@ describe('RetrievalCoordinator', () => {
     for (const call of safeRecall.mock.calls) {
       expect((call[0] as unknown as { identity: unknown }).identity).toEqual(identity())
     }
-    expect(outcome.block.split('\n')[0]).toBe(
-      'Known context (recalled memory; may be incomplete):',
-    )
+    expect(outcome.block.split('\n')[0]).toBe('Known context:')
     expect(outcome.block).toContain('amber-otter-7731')
     expect(outcome.block).toContain('CT 103')
     expect(outcome.queryHits).toBe(1)
@@ -124,7 +122,7 @@ describe('RetrievalCoordinator', () => {
     )
     const { coordinator: retrieval, cfg } = coordinator(safeRecall)
     const outcome = await retrieval.retrieve({ query: QUESTION, turn: 1 })
-    const lines = outcome.block.split('\n').filter((line) => line.startsWith('- ['))
+    const lines = outcome.block.split('\n').filter((line) => line.startsWith('- '))
     expect(lines).toHaveLength(cfg.retrieval.maxItems)
     expect(lines[0]).toContain('stable memory 0')
   })
@@ -215,14 +213,14 @@ describe('RetrievalCoordinator', () => {
     expect(safeRecall).toHaveBeenCalledTimes(4)
   })
 
-  it('formats source and confidence labels through one shared contract', () => {
+  it('formats label, scope, and date through one shared contract', () => {
     const block = formatMemoryBlock(
       [hit('1', 'alpha', 0.95), hit('2', 'beta', 0.5), hit('3', 'gamma', 0.1)],
       { maxTokens: 500, maxItems: 3 },
     )
-    expect(block.text).toContain('- [project · high] alpha')
-    expect(block.text).toContain('- [project · medium] beta')
-    expect(block.text).toContain('- [project · low] gamma')
+    expect(block.text).toContain('- alpha · project · 2026-01-01')
+    expect(block.text).toContain('- beta · project · 2026-01-01')
+    expect(block.text).toContain('- gamma · project · 2026-01-01')
     expect(block.text).not.toContain('untrusted')
   })
 })

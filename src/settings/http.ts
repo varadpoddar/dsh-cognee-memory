@@ -4,8 +4,11 @@
  * (`dsh-host-webserver/lib/types/index.d.ts:169-174`, handler receives node's
  * `IncomingMessage`/`ServerResponse`).
  *
- * There is no settings-page slot for a third-party plugin in 0.2.1-rc.5, so the
- * page is plain HTML the plugin owns. Authentication is mandatory: the routes
+ * A third-party plugin *can* contribute a native settings section through the
+ * client-side `settings.section` slot (see docs/UI_INTEGRATION.md), but that
+ * requires a browser bundle and a live Web shell. This page stays: it is the
+ * only surface that works without the client bundle, and it is the surface the
+ * live acceptance run uses. Authentication is mandatory: the routes
  * answer with 503 unless `COGNEE_MEMORY_SETTINGS_TOKEN` is set, and then require
  * that token as `Authorization: Bearer ...` or `?token=...`.
  *
@@ -26,6 +29,11 @@ import type { WebServerLike } from '../types.js'
 export const SETTINGS_PAGE_PATH = '/plugins/cognee-memory/settings'
 /** Path of the machine-readable status. */
 export const SETTINGS_JSON_PATH = '/plugins/cognee-memory/settings.json'
+/**
+ * Prefix of the per-memory provenance detail view. Declared here (the settings
+ * page links to it) and re-exported by `./provenance-http.ts`, which serves it.
+ */
+export const MEMORY_DETAIL_PATH_PREFIX = '/plugins/cognee-memory/memory/'
 
 /** A settings form is small; anything larger is not a submission. */
 const MAX_BODY_BYTES = 8_192
@@ -40,7 +48,8 @@ export interface SettingsRoutesOptions {
   readonly inspectionTimeoutMs?: number
 }
 
-type Authorization = { readonly ok: true } | { readonly ok: false; readonly status: 401 | 503; readonly message: string }
+/** Result of the settings-token check; shared with the provenance routes. */
+export type Authorization = { readonly ok: true } | { readonly ok: false; readonly status: 401 | 503; readonly message: string }
 
 function readToken(req: IncomingMessage, url: URL): string | undefined {
   const header = req.headers.authorization
@@ -58,7 +67,7 @@ function tokensMatch(expected: string, supplied: string): boolean {
   return timingSafeEqual(a, b)
 }
 
-function authorize(req: IncomingMessage, url: URL, env: NodeJS.ProcessEnv): Authorization {
+export function authorize(req: IncomingMessage, url: URL, env: NodeJS.ProcessEnv): Authorization {
   const expected = (env[SETTINGS_TOKEN_ENV] ?? '').trim()
   if (expected === '') {
     return {
@@ -76,7 +85,7 @@ function authorize(req: IncomingMessage, url: URL, env: NodeJS.ProcessEnv): Auth
   return { ok: true }
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -95,7 +104,11 @@ function formatPercent(value: number): string {
   return `${Math.round(value * 1000) / 10}%`
 }
 
-function renderInspection(inspection: SettingsInspection | undefined, error: string | undefined): string {
+function renderInspection(
+  inspection: SettingsInspection | undefined,
+  error: string | undefined,
+  options: { readonly token?: string } = {},
+): string {
   if (inspection === undefined) {
     return `<fieldset><legend>Inspection</legend><p class="hint">${
       error === undefined
@@ -120,9 +133,18 @@ function renderInspection(inspection: SettingsInspection | undefined, error: str
           )
           .join('')
   const memories = inspection.memories
+  // The detail link carries the request token forward exactly like the form's
+  // own action does (`action=""`), never a stored secret; without a token on
+  // this request there is no link at all.
+  const token = options.token ?? ''
+  const detailLink = (id: string): string => {
+    if (token === '') return '<span class="hint">token required</span>'
+    const href = `${MEMORY_DETAIL_PATH_PREFIX}${encodeURIComponent(id)}?token=${encodeURIComponent(token)}&format=html`
+    return `<a href="${escapeHtml(href)}" rel="noreferrer">Open</a>`
+  }
   const memoryRows =
     memories.length === 0
-      ? '<tr><td colspan="5">No memories recorded in this process.</td></tr>'
+      ? '<tr><td colspan="6">No memories recorded in this process.</td></tr>'
       : memories
           .map(
             (row) => `<tr>
@@ -131,6 +153,7 @@ function renderInspection(inspection: SettingsInspection | undefined, error: str
   <td>${escapeHtml(row.preview)}</td>
   <td>${row.attempts ?? ''}</td>
   <td>${escapeHtml(row.reason ?? '')}</td>
+  <td>${detailLink(row.id)}</td>
 </tr>`,
           )
           .join('')
@@ -180,7 +203,10 @@ function renderInspection(inspection: SettingsInspection | undefined, error: str
   <h2>Datasets</h2>
   <table><thead><tr><th>Dataset</th><th>Records</th><th>State</th></tr></thead><tbody>${datasets}</tbody></table>
   <h2>Memories</h2>
-  <table><thead><tr><th>State</th><th>Dataset</th><th>Preview</th><th>Attempts</th><th>Reason</th></tr></thead><tbody>${memoryRows}</tbody></table>
+  <p class="hint">Each memory opens a token-protected, script-free provenance page: dataset name and UUID,
+  document id, created date, ingest state, the search type that surfaced it, confidence, semantic key,
+  supersession refs, source refs, and a bounded excerpt.</p>
+  <table><thead><tr><th>State</th><th>Dataset</th><th>Preview</th><th>Attempts</th><th>Reason</th><th>Provenance</th></tr></thead><tbody>${memoryRows}</tbody></table>
   <p class="hint">Inspection is read-only in this pass: deletion, correction, and consolidation are deferred.
   Inspected at ${escapeHtml(inspection.inspectedAt)}.${
     inspection.memory.degraded === undefined ? '' : ` ${escapeHtml(inspection.memory.degraded)}.`
@@ -217,33 +243,56 @@ export function renderSettingsPage(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cognee memory settings</title>
 <style>
-:root{color-scheme:light dark}
-body{font:15px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:56rem;padding:0 1rem}
-h1{font-size:1.35rem;margin:0 0 .25rem}
-h2{font-size:1rem;margin:1.2rem 0 .4rem}
-p.sub{margin:0 0 1.25rem;opacity:.75}
-fieldset{border:1px solid #8884;border-radius:.5rem;padding:1rem;margin:0 0 1rem}
-legend{padding:0 .4rem;font-weight:600}
-label{display:block;margin:.6rem 0 .2rem;font-weight:500}
-input[type=url]{width:100%;box-sizing:border-box;padding:.45rem;font:inherit;border:1px solid #8888;border-radius:.35rem}
-.hint{font-size:.85em;opacity:.7;margin:.15rem 0 0}
-.row{display:flex;gap:.5rem;align-items:center;margin:.4rem 0}
-dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.5rem 0 0;font-size:.92em}
-dt{opacity:.7}
-dd{margin:0;font-family:ui-monospace,monospace;word-break:break-all}
+:root{color-scheme:light dark;--bg:#fbfbfd;--fg:#16181d;--muted:#5b6270;--line:#d8dbe3;--card:#fff;--accent:#2b6cb0;--accent-fg:#fff;--ok:#1a7f37;--warn:#9a6700;--err:#b42318;--code:#f2f3f7}
+@media (prefers-color-scheme:dark){:root{--bg:#14161b;--fg:#e8eaf0;--muted:#9aa2b1;--line:#2c313c;--card:#1b1e25;--accent:#8ab4f8;--accent-fg:#101318;--ok:#3fb950;--warn:#d29922;--err:#f85149;--code:#20242c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:64rem;margin:0 auto;padding:2.5rem 1.25rem 4rem}
+header{display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-start;justify-content:space-between;margin:0 0 1.5rem}
+h1{font-size:1.45rem;margin:0}
+h2{font-size:.95rem;letter-spacing:.01em;text-transform:uppercase;color:var(--muted);margin:1.6rem 0 .6rem}
+p.sub{margin:.25rem 0 0;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:.4rem}
+.chip{border:1px solid var(--line);border-radius:999px;padding:.2rem .65rem;font-size:.78rem;background:var(--card);color:var(--muted)}
+.chip.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.chip.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+fieldset{border:1px solid var(--line);border-radius:.75rem;padding:1.1rem 1.25rem;margin:0 0 1rem;background:var(--card)}
+legend{padding:0 .45rem;font-weight:650}
+label{display:block;margin:.65rem 0 .25rem;font-weight:500}
+input[type=url],input[type=text]{width:100%;padding:.5rem .6rem;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:.45rem}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hint{font-size:.86em;color:var(--muted);margin:.2rem 0 0}
+.row{display:flex;gap:.6rem;align-items:center;margin:.5rem 0}
+dl{display:grid;grid-template-columns:minmax(10rem,auto) 1fr;gap:.4rem 1rem;margin:.4rem 0 0;font-size:.92em}
+dt{color:var(--muted)}
+dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
 table{width:100%;border-collapse:collapse;font-size:.85em;margin:.2rem 0 0}
-th,td{text-align:left;vertical-align:top;padding:.3rem .4rem;border-top:1px solid #8883}
-th{opacity:.7;font-weight:600}
+th,td{text-align:left;vertical-align:top;padding:.4rem .45rem;border-top:1px solid var(--line)}
+thead th{color:var(--muted);font-weight:600;border-top:0}
 td{word-break:break-word}
-button{padding:.5rem 1rem;font:inherit;border-radius:.35rem;border:1px solid #8888;cursor:pointer}
-.err{border:1px solid #c44;background:#c4411f22;padding:.6rem .8rem;border-radius:.4rem;margin:0 0 1rem}
-.ok{border:1px solid #2a2;background:#2a222;background:#2a22;padding:.6rem .8rem;border-radius:.4rem;margin:0 0 1rem}
-code{font-family:ui-monospace,monospace}
+a{color:var(--accent)}
+button{padding:.55rem 1.1rem;font:inherit;color:var(--accent-fg);background:var(--accent);border:1px solid transparent;border-radius:.45rem;cursor:pointer}
+button:hover{filter:brightness(1.05)}
+.err{border:1px solid var(--err);background:color-mix(in srgb,var(--err) 12%,transparent);padding:.65rem .85rem;border-radius:.5rem;margin:0 0 1rem}
+.ok{border:1px solid var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);padding:.65rem .85rem;border-radius:.5rem;margin:0 0 1rem}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);padding:.1rem .3rem;border-radius:.3rem}
+@media (max-width:720px){main{padding:1.5rem .9rem 3rem}dl{grid-template-columns:1fr}dt{margin-top:.35rem}}
 </style></head>
-<body>
-<h1>Cognee memory settings</h1>
-<p class="sub">Saved to <code>${escapeHtml(status.filePath)}</code>. The address applies to subsequent
-memory tools calls; no restart is needed for a URL, toggle, or enable/disable change.</p>
+<body><main>
+<header>
+  <div>
+    <h1>Cognee memory settings</h1>
+    <p class="sub">Persisted at <code>${escapeHtml(status.filePath)}</code>. A URL, toggle, or
+    enable/disable change applies to the next memory call; switching transport needs a restart.</p>
+  </div>
+  <div class="chips" role="status" aria-live="polite">
+    <span class="chip ${status.enabled ? 'on' : 'off'}">memory ${status.enabled ? 'enabled' : 'disabled'}</span>
+    <span class="chip ${status.autoRecall ? 'on' : 'off'}">auto-recall ${status.autoRecall ? 'on' : 'off'}</span>
+    <span class="chip ${status.autoWrite ? 'on' : 'off'}">auto-write ${status.autoWrite ? 'on' : 'off'}</span>
+    <span class="chip ${status.keySet ? 'on' : 'off'}">${escapeHtml(status.keyVar)} ${status.keySet ? 'set' : 'unset'}</span>
+    <span class="chip">${escapeHtml(status.mcpUrl === undefined ? 'rest' : 'mcp-http')}</span>
+  </div>
+</header>
 ${notice}${errors}
 <form method="post" action="${escapeHtml(action)}">
   <fieldset>
@@ -278,8 +327,8 @@ ${notice}${errors}
   </fieldset>
   <button type="submit">Save settings</button>
 </form>
-${renderInspection(options.inspection, options.inspectionError)}
-</body></html>
+${renderInspection(options.inspection, options.inspectionError, { token: options.token ?? '' })}
+</main></body></html>
 `
 }
 
@@ -295,7 +344,7 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-function send(res: ServerResponse, status: number, body: string, contentType: string, headers: Record<string, string> = {}): void {
+export function send(res: ServerResponse, status: number, body: string, contentType: string, headers: Record<string, string> = {}): void {
   res.writeHead(status, {
     'content-type': contentType,
     'cache-control': 'no-store',
@@ -307,11 +356,11 @@ function send(res: ServerResponse, status: number, body: string, contentType: st
   res.end(body)
 }
 
-function sendJson(res: ServerResponse, status: number, value: unknown): void {
+export function sendJson(res: ServerResponse, status: number, value: unknown): void {
   send(res, status, `${JSON.stringify(value, null, 2)}\n`, 'application/json; charset=utf-8')
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string): void {
+export function sendHtml(res: ServerResponse, status: number, html: string): void {
   send(res, status, html, 'text/html; charset=utf-8')
 }
 

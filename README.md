@@ -1,12 +1,13 @@
 # dsh-cognee-memory
 
 A DSH (DeepSeek Harness) Cordis plugin that gives agents **persistent memory
-backed by Cognee** — bounded recall injected as untrusted prompt context, plus
-explicit remember/forget/status tools and authoritative task-outcome write-back.
+backed by Cognee** — a bounded `Known context:` block injected as data, explicit
+remember/recall/forget/status tools, authoritative task-outcome write-back, a
+memory-provenance side panel, and an authenticated settings page.
 
 ## Status: live-verified against Cognee 1.6.10-local
 
-Version `0.1.0`. The REST adapter is verified against the real instance at
+Version `0.2.0`. The REST adapter is verified against the real instance at
 `http://10.20.10.15:8000/api/v1` (Cognee `1.6.10-local`, Postgres + pgvector,
 `ENABLE_BACKEND_ACCESS_CONTROL=true`) and is installed in the real DSH
 `0.2.1-rc.5` profile on CT 103. Every request/response shape in
@@ -23,6 +24,46 @@ assumed:
 Evidence: [`docs/LIVE_INTEGRATION.md`](docs/LIVE_INTEGRATION.md) (commands,
 redacted payloads, timings, E2E) and [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md).
 
+## Install, upgrade, rollback
+
+The plugin mounts as one profile row; nothing in DSH itself is patched.
+
+```bash
+# install (a profile is any DSH profile name, e.g. `web`)
+dsh plugin --profile web add ./dsh-cognee-memory-0.2.0.tgz
+# restart the harness process once: the composed tree is read at boot
+systemctl restart deepseek-harness        # or stop/start `dsh web` locally
+
+# upgrade: install the newer tarball, restart the same way
+dsh plugin --profile web add ./dsh-cognee-memory-0.3.0.tgz
+systemctl restart deepseek-harness
+
+# rollback: install the previous tarball and restart
+dsh plugin --profile web add ./dsh-cognee-memory-0.1.0.tgz
+systemctl restart deepseek-harness
+```
+
+State lives outside the package and survives install/upgrade/rollback:
+`$DSH_HOME/plugins/cognee-memory/settings.json` (the settings page's file) and
+`$DSH_HOME/plugins/cognee-memory/provenance.json` (bounded provenance metadata).
+Delete either file to start that store empty. Credentials are never in either
+file: the Cognee key and the settings token come from the environment
+(`COGNEE_API_KEY`, `COGNEE_MEMORY_SETTINGS_TOKEN`).
+
+## UI surfaces
+
+| Surface | Where | Auth |
+| --- | --- | --- |
+| Settings page | `GET/POST /plugins/cognee-memory/settings` | settings token (`503` unset, `401` wrong) |
+| Settings JSON | `GET /plugins/cognee-memory/settings.json` | settings token |
+| Provenance JSON / page | `GET /plugins/cognee-memory/memory/<id>` (`?format=html` for the page) | settings token + recall scope policy; unauthorized ids are `404` |
+| Memory list | `GET /plugins/cognee-memory/memories.json` | settings token + recall scope policy |
+| Memory-provenance side panel | Right Sidebar tab type `cognee-memory.memory`, listed on the right Sidebar guide page | the token is entered in the panel and held in memory only |
+
+Why these are the right extension points — and the exact client registration
+API with installed-tree citations — is in
+[`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md).
+
 ## Read first
 
 - **[`docs/RESEARCH.md`](docs/RESEARCH.md)** — verified DSH 0.2.1-rc.5 plugin
@@ -38,6 +79,9 @@ redacted payloads, timings, E2E) and [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.
 - **[`docs/WEB_PROFILE_VISIBILITY.md`](docs/WEB_PROFILE_VISIBILITY.md)** — why an
   installed plugin can be missing from the long-running `web` profile, and how to
   confirm it in one command.
+- **[`docs/UI_INTEGRATION.md`](docs/UI_INTEGRATION.md)** — the installed DSH's
+  client extension points, the side-panel verdict, and the security model of the
+  provenance route.
 
 ## Runtime settings (no file editing, no restart for the address)
 

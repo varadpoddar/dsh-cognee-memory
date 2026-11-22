@@ -19,6 +19,7 @@ import { EphemeralSessionMemory } from './ephemeral.js'
 import { IdentityResolver } from './identity.js'
 import { RecallService, type RecallRequest } from './recall.js'
 import { scopeFromName, sameScope, scopesForIdentity } from './scopes.js'
+import type { ProvenanceIndex } from './provenance-index.js'
 import { evaluateWrite } from './write-policy.js'
 
 export interface CoordinatorDependencies {
@@ -31,6 +32,12 @@ export interface CoordinatorDependencies {
   readonly endpoint?: () => string
   readonly identityResolver?: IdentityResolver
   readonly ephemeral?: EphemeralSessionMemory
+  /**
+   * Optional provenance index. When present, a durable recall records what
+   * surfaced each memory and a durable write records where it landed; the
+   * authenticated detail route reads the same index. Never on the tool path.
+   */
+  readonly provenanceIndex?: Pick<ProvenanceIndex, 'recordRecall' | 'recordWrite' | 'markSuperseded'>
 }
 
 export interface RememberRequest {
@@ -41,6 +48,10 @@ export interface RememberRequest {
   readonly provenance: Provenance
   /** Caller-supplied stable idempotency key (extraction pipeline); never model prose. */
   readonly dedupeKey?: string
+  /** Extracted semantic key (extraction pipeline); never model prose. */
+  readonly semanticKey?: string
+  /** Id this write replaces (extraction pipeline). */
+  readonly supersedes?: string
   readonly signal?: AbortSignal
 }
 
@@ -94,6 +105,10 @@ export class MemoryCoordinator {
   private readonly dedup = new DedupIndex()
   readonly identityResolver: IdentityResolver
   private readonly ephemeral: EphemeralSessionMemory
+  private readonly provenanceIndex: Pick<
+    ProvenanceIndex,
+    'recordRecall' | 'recordWrite' | 'markSuperseded'
+  > | undefined
 
   constructor(dependencies: CoordinatorDependencies) {
     this.adapter = dependencies.adapter
@@ -102,6 +117,7 @@ export class MemoryCoordinator {
     this.cwd = dependencies.cwd
     this.clock = dependencies.clock ?? (() => new Date())
     this.endpointSource = dependencies.endpoint
+    this.provenanceIndex = dependencies.provenanceIndex
     this.ephemeral = dependencies.ephemeral ?? new EphemeralSessionMemory(() => this.clock())
     this.identityResolver =
       dependencies.identityResolver ??
@@ -241,6 +257,26 @@ export class MemoryCoordinator {
         },
       })
       this.dedup.add({ id: result.id, text: decision.text, scope, createdAt: result.createdAt })
+      if (this.provenanceIndex !== undefined) {
+        try {
+          this.provenanceIndex.recordWrite({
+            id: result.id,
+            scope,
+            identity,
+            createdAt: result.createdAt,
+            text: decision.text,
+            ...(request.semanticKey === undefined ? {} : { semanticKey: request.semanticKey }),
+            ...(request.supersedes === undefined ? {} : { supersedes: request.supersedes }),
+            provenance: request.provenance,
+            state: 'indexed',
+          })
+          if (request.supersedes !== undefined) {
+            this.provenanceIndex.markSuperseded(request.supersedes, result.id)
+          }
+        } catch {
+          this.metrics?.increment('provenance.record.failures')
+        }
+      }
       return result
     } catch (error) {
       this.metrics?.increment('remember.failures')
@@ -251,7 +287,20 @@ export class MemoryCoordinator {
   }
 
   async recall(request: RecallRequest): Promise<RecallHit[]> {
-    return this.recallService.recall(request)
+    const hits = await this.recallService.recall(request)
+    if (this.provenanceIndex !== undefined && hits.length > 0) {
+      try {
+        const identity = await this.identityResolver.resolve(request.identity)
+        this.provenanceIndex.recordRecall(hits, {
+          identity,
+          searchType: this.config.recall.searchType,
+        })
+      } catch {
+        // Provenance is evidence for humans; a failure must never fail a recall.
+        this.metrics?.increment('provenance.record.failures')
+      }
+    }
+    return hits
   }
 
   /**

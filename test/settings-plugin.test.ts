@@ -80,8 +80,11 @@ describe('plugin wiring for the runtime settings page', () => {
     const dispose = apply(pluginContext, { apiBaseUrl: `${first.url}/api/v1` })
     cleanups.push(() => dispose?.())
 
-    // 1. The page and its JSON are mounted through ctx.webServer.register.
+    // 1. The page, its JSON, and the provenance detail routes are mounted
+    // through ctx.webServer.register.
     expect([...routes.keys()].sort()).toEqual([
+      '/plugins/cognee-memory/memories.json',
+      '/plugins/cognee-memory/memory/',
       '/plugins/cognee-memory/settings',
       '/plugins/cognee-memory/settings.json',
     ])

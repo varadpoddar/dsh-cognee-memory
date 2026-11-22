@@ -36,26 +36,27 @@ describe('prompt context block', () => {
       [record('1', 'first'), record('2', 'second'), record('3', 'third')],
       cfg,
     )
-    expect(block).toContain('Known context (recalled memory; may be incomplete):')
+    expect(block.split('\n')[0]).toBe('Known context:')
     expect(block).not.toContain('untrusted')
     expect(block).not.toContain('<cognee-memory')
-    expect(block).toContain('- [project · high] first')
-    expect(block).toContain('- [project · high] second')
+    expect(block).toContain('- first · project · 2026-01-01')
+    expect(block).toContain('- second · project · 2026-01-01')
     expect(block).not.toContain('third')
     expect(estimateTokens(block)).toBeLessThanOrEqual(cfg.prompt.maxTokens)
   })
 
-  it('labels source and confidence without a per-message security preamble', () => {
+  it('renders one label · scope · date line per memory without a security preamble', () => {
     const hits = [
       { record: { ...record('1', 'alpha').record, scope: PROJECT_SCOPE }, score: 0.82 },
       { record: { ...record('2', 'beta').record, scope: PROJECT_SCOPE }, score: 0.5 },
       { record: { ...record('3', 'gamma').record, scope: PROJECT_SCOPE }, score: 0.1 },
     ]
     const block = buildMemoryContextBlock(hits, contextConfig({ maxItems: 5, maxTokens: 1_000 }))
-    expect(block).toContain('- [project · high] alpha')
-    expect(block).toContain('- [project · medium] beta')
-    expect(block).toContain('- [project · low] gamma')
-    expect(block.split('\n')[0]).toBe('Known context (recalled memory; may be incomplete):')
+    expect(block).toContain('- alpha · project · 2026-01-01')
+    expect(block).toContain('- beta · project · 2026-01-01')
+    expect(block).toContain('- gamma · project · 2026-01-01')
+    expect(block).not.toContain('high')
+    expect(block.split('\n')[0]).toBe('Known context:')
   })
 
   it('drops whole items that exceed the token budget', () => {

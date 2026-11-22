@@ -11,10 +11,13 @@ The installed DSH `0.2.1-rc.5` gives a plugin exactly one web extension point:
 - `registerFallback` / `tapIndex` exist too, but the shipped Web composition takes
   the single fallback seat (the SPA), so a plugin must not claim it.
 
-There is **no** settings/config service and **no** third-party settings-page slot in
-this version: `dsh-client-ui-settings-general` is a bundle-mounted first-party row,
-not a slot a package can extend. `grep` for `super(ctx, "settings"`, `"preferences"` or
-`"config"` over `$PKG/*/lib/index.js` finds no such service.
+There is **no** host-side settings/config service, so the runtime address has to be a
+file this plugin owns. A *client-side* settings section does exist as a slot
+(`settings.section`, `$PKG/dsh-client-ui-settings/lib/types/client/contract/slots.d.ts:73`),
+but it needs a browser bundle and a live Web shell, and it would not remove the need for
+this file; the plugin therefore keeps the host-served page as its settings surface.
+See [UI_INTEGRATION.md](UI_INTEGRATION.md) for the client surface and its exact
+registration API.
 
 So the plugin ships all three pieces the task allowed:
 
@@ -88,6 +91,17 @@ The settings file contains only URL/enable flags. `memory_status` and
 `/settings.json` report the credential as `set` / `unset` from the environment
 (`COGNEE_API_KEY` by default, `config.apiTokenEnv`) and never its value. Log lines
 name the new endpoint only.
+
+## Provenance detail view (0.2.0)
+
+`GET /plugins/cognee-memory/memory/<id>` returns provenance JSON and, with
+`?format=html` or `Accept: text/html`, a script-free detail page with a Cognee UI
+deep link. `GET /plugins/cognee-memory/memories.json` lists the caller-readable
+memories for the side panel. Both use the same `COGNEE_MEMORY_SETTINGS_TOKEN`
+(`503` unset, `401` missing/wrong) and the recall scope policy; unknown,
+cross-scope, and foreign-principal ids all answer a generic `404`. Every memory
+row on the settings page links to its detail page when the request carries a
+token. See [UI_INTEGRATION.md](UI_INTEGRATION.md) §"Security model".
 
 ## Milestone 9 additions (2026-11-22)
 

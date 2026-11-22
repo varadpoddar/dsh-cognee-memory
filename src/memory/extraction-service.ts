@@ -177,6 +177,8 @@ export class ExtractionService {
             evidence: `queue:${candidate.id}`,
           }),
           dedupeKey: candidate.idempotencyKey,
+          semanticKey: candidate.semanticKey,
+          ...(candidate.supersedes === undefined ? {} : { supersedes: candidate.supersedes }),
         })
         this.metrics?.increment('extraction.ingested')
         return { status: 'complete', dataRef: `cognee:${operation.dataset}#${result.id}` }

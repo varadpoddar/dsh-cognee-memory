@@ -1,0 +1,16 @@
+# The `files` allowlist in package.json is authoritative; this file only keeps
+# local artifacts out if the allowlist is ever relaxed.
+*.tgz
+node_modules/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+.git/
+docs/RESEARCH.md
+docs/LIVE_INTEGRATION.md
+docs/TEST_RESULTS.md
+docs/COGNEE_DECISIONS.md
+docs/COMPATIBILITY.md
+docs/WEB_PROFILE_VISIBILITY.md
+docs/research/
