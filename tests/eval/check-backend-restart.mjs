@@ -45,7 +45,7 @@ function askHarness() {
   const inner =
     'printf %s ' + JSON.stringify(QUESTION) + ` > ${promptFile}; chmod 644 ${promptFile}; ` +
     'su dsh -s /bin/bash -c "set -a; . /etc/dsh/cognee.env; . /etc/dsh/llm.env; set +a; ' +
-    `DSH_HOME=/var/lib/deepseek-harness/.dsh timeout 150 dsh --profile headless --patch /tmp/m11-eval/patch-tools-off.yml headless --json \\"$(cat ${promptFile})\\""`
+    `DSH_HOME=/var/lib/deepseek-harness/.dsh timeout 150 dsh --profile headless --patch /tmp/m11-eval/patch-tools-off.yml --json \\"$(cat ${promptFile})\\""`
   const started = Date.now()
   try {
     const out = ssh(CONTROL, `pct exec ${CT} -- bash -lc ${JSON.stringify(inner)}`, 200_000)

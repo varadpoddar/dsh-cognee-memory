@@ -182,7 +182,7 @@ lines.push(fence([
   `su -c 'set -a; . /etc/dsh/cognee.env; . /etc/dsh/llm.env; set +a; node tests/eval/run-eval.mjs --run-id ${runId} --plugin-dir /var/lib/deepseek-harness/.dsh/profiles/headless/node_modules/dsh-cognee-memory/lib --work-dir /tmp/m11-eval --out /tmp/m11-eval/report-part1.json'  (on CT 103)`,
   `DSH_SSH_KEY=~/.ssh/dsh node tests/eval/check-backend-restart.mjs --run-id ${runId} --out /tmp/m11-eval/report-backend-restart.json`,
   `node tests/eval/render-report.mjs --in /tmp/m11-eval/report-part1.json --in /tmp/m11-eval/report-backend-restart.json --out docs/EVALUATION.md`,
-  'dsh --profile headless --patch /tmp/m11-eval/patch-base.yml headless --json "<question>"',
+  'dsh --profile headless --patch /tmp/m11-eval/patch-base.yml --json "<question>"',
   'systemctl restart deepseek-harness',
   'pct exec 106 -- docker restart cognee',
 ].join('\n')))

@@ -179,7 +179,7 @@ function runHeadless(prompt, patch, timeoutMs = 240_000) {
   const inner =
     'set -a; . /etc/dsh/cognee.env; . /etc/dsh/llm.env; set +a; ' +
     `DSH_HOME=${DSH_HOME} timeout ${Math.round(timeoutMs / 1000)} ` +
-    `dsh --profile headless --patch ${patch} headless --json "$(cat ${promptFile})"`
+    `dsh --profile headless --patch ${patch} --json "$(cat ${promptFile})"`
   const started = Date.now()
   let out = ''
   let ok = true
@@ -320,7 +320,7 @@ async function main() {
       'questions: ' + facts.map((f) => f.color).join(', ') + '\n' +
       aRows.map((row) => `${row.color}: correct=${row.correct} ms=${row.ms} toolCalls=${row.toolCalls} :: ${row.final.replace(/\s+/g, ' ')}`).join('\n') +
       `\nall-tools patch: ${patches.noTools}`,
-    commands: ['dsh --profile headless --patch patch-base.yml headless --json "<question>"'],
+    commands: ['dsh --profile headless --patch patch-base.yml --json "<question>"'],
   })
 
   // B — same question with every memory tool disabled (prefetch injection only).
@@ -333,7 +333,7 @@ async function main() {
     status: bCorrect && bRun.toolCalls === 0 ? 'PASS' : 'FAIL',
     summary: `tools disabled; tool_events=${bRun.toolCalls}; answer ${bCorrect ? 'carried' : 'did NOT carry'} the codeword, so ${bCorrect ? 'prefetch injection alone sufficed' : 'prefetch injection was insufficient'}.`,
     evidence: `patch: ${patches.noTools} (memory tools + every base tool disabled)\nprompt: ${bFact.question}\ntool_events: ${bRun.toolCalls} [${bRun.toolNames.join(', ')}]\nfinal: ${bRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
-    commands: ['dsh --profile headless --patch patch-tools-off.yml headless --json "<question>"'],
+    commands: ['dsh --profile headless --patch patch-no-tools.yml --json "<question>"'],
   })
 
   // C — automatic write of an explicit fact with tools off (no tool call possible).
@@ -471,7 +471,7 @@ async function main() {
         : `last injected block ${injectedTokens} tokens, limit ${INJECTION_LIMIT} (retrieval.stableTokens ${STABLE_TOKENS} + queryTokens ${QUERY_TOKENS}); counter from memory_status.`,
     evidence:
       `prompt: ${nPrompt}\ntool_events: ${nRun.toolCalls}\ncounters:${countersLine}\nfinal: ${nRun.final.replace(/\s+/g, ' ').slice(0, 300)}`,
-    commands: [`dsh --profile headless --patch patch-base.yml headless --json "<ask memory_status>"`],
+    commands: [`dsh --profile headless --patch patch-base.yml --json "<ask memory_status>"`],
   })
 
   // O — injection resistance: memory containing instructions is data.
