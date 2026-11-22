@@ -74,8 +74,14 @@ const adapter = new CogneeRestAdapter({ config: CONFIG, env: process.env })
 const evalScope = makeScopeRef('project', EVAL_PROJECT)
 const otherScope = makeScopeRef('project', OTHER_PROJECT)
 
-function patchYaml({ tools = true, enabled = true, projectId = EVAL_PROJECT } = {}) {
-  return [
+const DISABLED_TOOL_PLUGINS = [
+  'tool-bash', 'tool-pwsh', 'tool-fs', 'tool-fs-search', 'tool-working-directory',
+  'tool-jobs', 'tool-skill', 'tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork',
+  'tool-workflow', 'tool-todo', 'tool-goal', 'tool-web', 'tool-plugin-manager',
+]
+
+function patchYaml({ tools = true, enabled = true, projectId = EVAL_PROJECT, noTools = false } = {}) {
+  const lines = [
     '- id: cognee-memory',
     '  name: dsh-cognee-memory',
     '  config:',
@@ -104,23 +110,27 @@ function patchYaml({ tools = true, enabled = true, projectId = EVAL_PROJECT } = 
     '    tools:',
     `      enabled: ${tools ? 'true' : 'false'}`,
     '',
-  ].join('\n')
+  ]
+  if (noTools) {
+    for (const id of DISABLED_TOOL_PLUGINS) lines.push(`- id: ${id}`, '  disabled: true')
+  }
+  return lines.join('\n')
 }
 
 const patches = {
   base: path.join(WORK, 'patch-base.yml'),
-  toolsOff: path.join(WORK, 'patch-tools-off.yml'),
+  noTools: path.join(WORK, 'patch-no-tools.yml'),
   pluginOff: path.join(WORK, 'patch-plugin-off.yml'),
   other: path.join(WORK, 'patch-other-scope.yml'),
-  toolsOffOther: path.join(WORK, 'patch-other-scope-tools-off.yml'),
+  noToolsOther: path.join(WORK, 'patch-other-scope-no-tools.yml'),
 }
 fs.writeFileSync(patches.base, patchYaml({ tools: true }), { mode: 0o644 })
-fs.writeFileSync(patches.toolsOff, patchYaml({ tools: false }), { mode: 0o644 })
-fs.writeFileSync(patches.pluginOff, patchYaml({ tools: false, enabled: false }), { mode: 0o644 })
+fs.writeFileSync(patches.noTools, patchYaml({ tools: false, noTools: true }), { mode: 0o644 })
+fs.writeFileSync(patches.pluginOff, patchYaml({ tools: false, enabled: false, noTools: true }), { mode: 0o644 })
 fs.writeFileSync(patches.other, patchYaml({ tools: true, projectId: OTHER_PROJECT }), { mode: 0o644 })
-fs.writeFileSync(patches.toolsOffOther, patchYaml({ tools: false, projectId: OTHER_PROJECT }), { mode: 0o644 })
+fs.writeFileSync(patches.noToolsOther, patchYaml({ tools: false, projectId: OTHER_PROJECT, noTools: true }), { mode: 0o644 })
 
-async function api(pathname, init = {}) {
+async function apiOnce(pathname, init = {}) {
   const response = await fetch(`${API_ORIGIN}${pathname}`, {
     ...init,
     headers: {
@@ -134,6 +144,22 @@ async function api(pathname, init = {}) {
   let body = text
   try { body = text === '' ? undefined : JSON.parse(text) } catch { /* keep text */ }
   return { status: response.status, body }
+}
+
+/** Cognee occasionally drops one keep-alive connection; retry transport errors only. */
+async function api(pathname, init = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const result = await apiOnce(pathname, init)
+      if (result.status < 500) return result
+      lastError = new Error(`HTTP ${result.status}`)
+    } catch (error) {
+      lastError = error
+    }
+    await sleep(1_000 * attempt)
+  }
+  throw lastError
 }
 
 async function datasets() {
@@ -179,11 +205,13 @@ function runHeadless(prompt, patch, timeoutMs = 240_000) {
   const finalEvent = events.find((event) => event.type === 'final')
   const toolResults = events.filter((event) => event.type === 'tool_result')
   const toolCalls = events.filter((event) => event.type === 'tool_call')
+  const toolNames = toolCalls.map((event) => String(event.tool ?? '')).filter((name) => name !== '')
   return {
     ms: Date.now() - started,
     ok,
     final: typeof finalEvent?.text === 'string' ? finalEvent.text : '',
     toolCalls: toolCalls.length,
+    toolNames,
     toolResults,
     events,
     rawTail: out.split('\n').filter((line) => line.trim() !== '').slice(-6).join('\n').slice(0, 1200),
@@ -272,7 +300,7 @@ async function main() {
   // A — one-step codeword recall in a fresh process, first turn, tools available.
   const aRows = []
   for (const fact of facts) {
-    const run = runHeadless(fact.question, patches.base, 180_000)
+    const run = runHeadless(fact.question, patches.noTools, 180_000)
     aRows.push({
       color: fact.color,
       correct: run.final.includes(fact.token),
@@ -290,20 +318,21 @@ async function main() {
     summary: `${aCorrect}/${facts.length} first-turn answers contained the stored codeword (seeded ${seeded}/${facts.length}).`,
     evidence:
       'questions: ' + facts.map((f) => f.color).join(', ') + '\n' +
-      aRows.map((row) => `${row.color}: correct=${row.correct} ms=${row.ms} toolCalls=${row.toolCalls} :: ${row.final.replace(/\s+/g, ' ')}`).join('\n'),
+      aRows.map((row) => `${row.color}: correct=${row.correct} ms=${row.ms} toolCalls=${row.toolCalls} :: ${row.final.replace(/\s+/g, ' ')}`).join('\n') +
+      `\nall-tools patch: ${patches.noTools}`,
     commands: ['dsh --profile headless --patch patch-base.yml headless --json "<question>"'],
   })
 
   // B — same question with every memory tool disabled (prefetch injection only).
   const bFact = facts[1]
-  const bRun = runHeadless(bFact.question, patches.toolsOff, 180_000)
+  const bRun = runHeadless(bFact.question, patches.noTools, 180_000)
   const bCorrect = bRun.final.includes(bFact.token)
   addScenario({
     id: 'B',
     title: 'Same recall with memory tools disabled (tool_events=0)',
     status: bCorrect && bRun.toolCalls === 0 ? 'PASS' : 'FAIL',
     summary: `tools disabled; tool_events=${bRun.toolCalls}; answer ${bCorrect ? 'carried' : 'did NOT carry'} the codeword, so ${bCorrect ? 'prefetch injection alone sufficed' : 'prefetch injection was insufficient'}.`,
-    evidence: `patch: tools.enabled=false\nprompt: ${bFact.question}\ntool_events: ${bRun.toolCalls}\nfinal: ${bRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
+    evidence: `patch: ${patches.noTools} (memory tools + every base tool disabled)\nprompt: ${bFact.question}\ntool_events: ${bRun.toolCalls} [${bRun.toolNames.join(', ')}]\nfinal: ${bRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
     commands: ['dsh --profile headless --patch patch-tools-off.yml headless --json "<question>"'],
   })
 
@@ -311,11 +340,11 @@ async function main() {
   const cToken = `eval-offline-${RUN_ID}`
   const cPrompt = `Remember that the maintenance window for this project is ${cToken}. Reply DONE.`
   const cBefore = await evalRecordCount()
-  const cRun = runHeadless(cPrompt, patches.toolsOff, 180_000)
+  const cRun = runHeadless(cPrompt, patches.noTools, 180_000)
   // The harness process may exit before the durable outbox drains; one fresh
   // process recovers the outbox at plugin load. This is the plugin's own
   // crash-safe path, not a helper write.
-  runHeadless('Reply with exactly OK.', patches.toolsOff, 120_000)
+  runHeadless('Reply with exactly OK.', patches.noTools, 120_000)
   const cRetrievableMs = await waitForToken(evalScope, cToken, 150_000)
   const cAfter = cRetrievableMs === null ? null : await evalRecordCount()
   console.log(JSON.stringify({ step: 'C', retrievableMs: cRetrievableMs, records: cAfter }))
@@ -334,10 +363,10 @@ async function main() {
   const dupBefore = await evalRecordCount()
   const dupRuns = []
   for (let i = 0; i < 2; i += 1) {
-    const run = runHeadless(cPrompt, patches.toolsOff, 180_000)
+    const run = runHeadless(cPrompt, patches.noTools, 180_000)
     dupRuns.push({ ok: run.ok, toolCalls: run.toolCalls })
   }
-  runHeadless('Reply with exactly OK.', patches.toolsOff, 120_000)
+  runHeadless('Reply with exactly OK.', patches.noTools, 120_000)
   await waitForToken(evalScope, cToken, 60_000)
   await sleep(2_000)
   const dupAfter = await evalRecordCount()
@@ -346,7 +375,7 @@ async function main() {
 
   // D — recall the C fact in a new process.
   const dPrompt = 'What is the maintenance window code for this project? Reply with the code only.'
-  const dRun = runHeadless(dPrompt, patches.toolsOff, 180_000)
+  const dRun = runHeadless(dPrompt, patches.noTools, 180_000)
   const dCorrect = dRun.final.includes(cToken)
   addScenario({
     id: 'D',
@@ -370,7 +399,7 @@ async function main() {
     serviceState = `restart-failed: ${String(error).slice(0, 120)}`
   }
   await sleep(2_000)
-  const eRun = runHeadless(dPrompt, patches.toolsOff, 180_000)
+  const eRun = runHeadless(dPrompt, patches.noTools, 180_000)
   const eCorrect = eRun.final.includes(cToken)
   console.log(JSON.stringify({ step: 'E', correct: eCorrect, service: serviceState }))
   addScenario({
@@ -384,7 +413,7 @@ async function main() {
 
   // K — project + principal isolation.
   const otherFacts = facts[0]
-  const kRun = runHeadless(otherFacts.question, patches.toolsOffOther, 180_000)
+  const kRun = runHeadless(otherFacts.question, patches.noToolsOther, 180_000)
   const projectIsolated = !kRun.final.includes(otherFacts.token)
   const principalToken = `eval-principal-${RUN_ID}`
   const principalA = `eval-principal-a-${RUN_ID}`
