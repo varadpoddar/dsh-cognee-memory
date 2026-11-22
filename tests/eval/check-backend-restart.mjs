@@ -45,9 +45,20 @@ function askHarness() {
   // inside /tmp/m11-ask.sh on the harness host so the outer root shell never
   // expands it before the file is written.
   const encoded = Buffer.from(QUESTION, 'utf8').toString('base64')
+  const askScript = [
+    '#!/bin/bash',
+    'set -a',
+    '. /etc/dsh/cognee.env',
+    '. /etc/dsh/llm.env',
+    'set +a',
+    'exec su dsh -s /bin/bash -c \'DSH_HOME=/var/lib/deepseek-harness/.dsh timeout 150 dsh --profile headless --patch /tmp/m11-eval/patch-no-tools.yml --json "$(cat /tmp/m11-question.txt)"\'',
+    '',
+  ].join('\n')
+  const askEncoded = Buffer.from(askScript, 'utf8').toString('base64')
   const inner =
-    `printf %s ${encoded} | base64 -d > /tmp/m11-question.txt; ` +
-    'chmod 644 /tmp/m11-question.txt; bash /tmp/m11-ask.sh'
+    `printf %s ${askEncoded} | base64 -d > /tmp/m11-ask.sh; chmod 755 /tmp/m11-ask.sh; ` +
+    `printf %s ${encoded} | base64 -d > /tmp/m11-question.txt; chmod 644 /tmp/m11-question.txt; ` +
+    'bash /tmp/m11-ask.sh'
   const started = Date.now()
   try {
     const out = ssh(CONTROL, `pct exec ${CT} -- bash -lc ${JSON.stringify(inner)}`, 200_000)

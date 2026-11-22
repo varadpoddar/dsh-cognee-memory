@@ -322,7 +322,7 @@ async function main() {
       'questions: ' + facts.map((f) => f.color).join(', ') + '\n' +
       aRows.map((row) => `${row.color}: correct=${row.correct} ms=${row.ms} toolCalls=${row.toolCalls} :: ${row.final.replace(/\s+/g, ' ')}`).join('\n') +
       `\nall-tools patch: ${patches.noTools}`,
-    commands: ['dsh --profile headless --patch patch-memory-only.yml --json "<question>"'],
+    commands: ['dsh --profile headless --patch patch-no-tools.yml --json "<question>"'],
   })
 
   // B — same question with every memory tool disabled (prefetch injection only).
@@ -570,8 +570,8 @@ async function main() {
   report.notes.push(`write-to-retrievable samples(ms): ${JSON.stringify(writeSamples)}; recall samples(ms): ${JSON.stringify(recallSamples)}`)
   report.notes.push(`duplicate probe: C prompt re-run twice, dataset records ${dupBefore} → ${dupAfter}; added=${dupAdded}`)
   report.notes.push(`baseline without memory final: ${baselineRun.final.replace(/\s+/g, ' ').slice(0, 500)}`)
-  report.notes.push(`A/B/D/E first-turn successes: A ${aCorrect}/${facts.length} (prefetch-only), B ${bCorrect ? 1 : 0}/1 (prefetch-only, all tools off), D ${dCorrect ? 1 : 0}/1 (memory tools available: [${dRun.toolNames.join(', ')}]), E ${eCorrect ? 1 : 0}/1 (memory tools available: [${eRun.toolNames.join(', ')}])`)
-  report.notes.push('Prefetch-only probe (manual, same scope, no tools) asked "What is the maintenance window for this project? Reply with the value only." and the model answered: "No maintenance window is recorded in this project\'s context — only launch codes ... and a write-to-retrievable probe are present." The record ranked first at the adapter level for that query, so the miss is in the plugin retrieval layers (stable layer can consume the 8-item budget), not in Cognee. D/E therefore use the normal tool-enabled recall path; A/B prove prefetch-only works for high-salience facts.')
+  report.notes.push(`A/B/D/E first-turn successes: A ${aCorrect}/${facts.length} (prefetch-only), B ${bCorrect ? 1 : 0}/1 (prefetch-only, all tools off), D ${dCorrect ? 1 : 0}/1 (memory tools only: [${dRun.toolNames.join(', ')}]), E ${eCorrect ? 1 : 0}/1 (prefetch-only, all tools off: [${eRun.toolNames.join(', ')}])`)
+  report.notes.push('Prefetch-only probe (manual, same scope, no tools) asked "What is the maintenance window for this project? Reply with the value only." and the model answered: "No maintenance window is recorded in this project\'s context — only launch codes ... and a write-to-retrievable probe are present." The record ranked first at the adapter level for that query, so the miss is in the plugin retrieval layers (stable layer can consume the 8-item budget), not in Cognee. D therefore used only memory tools (four memory_recall calls); E used prefetch-only recall of the amber fact to isolate restart persistence from this retrieval miss.')
 
   fs.writeFileSync(OUT, `${JSON.stringify(report, null, 2)}\n`)
   console.log(JSON.stringify({ done: true, out: OUT, scenarios: report.scenarios.map((s) => [s.id, s.status]), metrics: report.metrics }))
