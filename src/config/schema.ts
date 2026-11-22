@@ -44,6 +44,18 @@ export const CogneeMemoryConfigSchema = z
     /** Master switch. Disabled means no hooks, tools, or network activity. */
     enabled: z.boolean().default(true),
 
+    /**
+     * Runtime toggles (Milestone 9 / settings page).
+     *
+     * `autoRecall` gates automatic prompt injection (prefetch + assembly
+     * substitution); explicit `memory_recall` tool calls stay available.
+     * `autoWrite` gates automatic extraction from committed turns; explicit
+     * `memory_remember` calls stay available, and a queue that was already
+     * committed is still drained so no accepted write is lost.
+     */
+    autoRecall: z.boolean().default(true),
+    autoWrite: z.boolean().default(true),
+
     /** Preferred transport. `auto` uses MCP when `mcpUrl` is set, otherwise REST. */
     transport: transportSchema.default('auto'),
 
@@ -189,6 +201,55 @@ export const CogneeMemoryConfigSchema = z
         maxQueryChars: z.number().int().min(1).max(20_000).default(900),
         timeoutMs: z.number().int().min(50).max(30_000).default(1_500),
         maxRetries: z.number().int().min(0).max(2).default(1),
+      })
+      .prefault({}),
+
+    /**
+     * Milestone 6 retrieval coordinator. Two layers share one hard budget:
+     * stable principal/project context first (`stableTokens`, refreshed once
+     * per turn and reused across steps), then query-specific hits
+     * (`queryTokens`) for the real first user message. `maxItems` and the
+     * combined token cap apply to the merged block; `budgetMs` bounds the whole
+     * retrieval, not each backend call.
+     */
+    retrieval: z
+      .object({
+        stableTokens: z.number().int().min(32).max(2_000).default(300),
+        queryTokens: z.number().int().min(32).max(4_000).default(900),
+        maxItems: z.number().int().min(1).max(20).default(8),
+        budgetMs: z.number().int().min(50).max(30_000).default(1_500),
+        /** Stable layer refresh cadence; query layer always follows the turn. */
+        stableRefreshMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
+      })
+      .prefault({}),
+
+    /**
+     * Milestone 4 authoritative task memory. Only verified lifecycle events and
+     * records accepted by a named authority reach this path; model prose never
+     * does. `scope` is the namespace task records are written to.
+     */
+    taskMemory: z
+      .object({
+        enabled: z.boolean().default(true),
+        scope: z.enum(['agent', 'user', 'project', 'team']).default('project'),
+        /** Cap on records kept per task, newest first. */
+        maxRecordsPerTask: z.number().int().min(1).max(200).default(50),
+      })
+      .prefault({}),
+
+    /**
+     * Milestone 5 durable write outbox. Transient failures retry with
+     * exponential backoff up to `maxAttempts`; permanent failures (authz,
+     * validation, redaction) are terminal on the first attempt.
+     */
+    outbox: z
+      .object({
+        dir: nonEmpty.optional(),
+        maxAttempts: z.number().int().min(1).max(10).default(3),
+        baseBackoffMs: z.number().int().min(10).max(60_000).default(500),
+        maxBackoffMs: z.number().int().min(100).max(600_000).default(30_000),
+        /** A `processing` entry older than this is re-claimed after a crash. */
+        leaseMs: z.number().int().min(1_000).max(3_600_000).default(60_000),
       })
       .prefault({}),
 

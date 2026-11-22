@@ -100,6 +100,30 @@ export interface AdapterStatus {
   readonly details?: Readonly<Record<string, JsonValue>>
 }
 
+/**
+ * One durable dataset the authenticated principal can see for a scope.
+ * Read-only inventory used by the settings page (`Memory 9`); it never carries
+ * memory text, only counts and identifiers.
+ */
+export interface MemoryDatasetInventory {
+  readonly id: string
+  /** Durable namespace key, e.g. `dsh-project-project-4be96e7c2cdbb95a1ac9`. */
+  readonly name: string
+  readonly scope?: ScopeRef
+  /** Raw data records in this dataset, when the backend can count them. */
+  readonly dataCount?: number
+  readonly searchable?: boolean
+  readonly state?: string
+}
+
+export interface MemoryInventory {
+  readonly datasets: readonly MemoryDatasetInventory[]
+  /** Total raw records across the visible datasets, when countable. */
+  readonly totalRecords?: number
+  readonly checkedAt: string
+  readonly truncated?: boolean
+}
+
 export type TransportKind = 'mcp-http' | 'mcp-stdio' | 'rest' | 'auto'
 export type ResolvedTransport = Exclude<TransportKind, 'auto'>
 
@@ -116,6 +140,8 @@ export interface MemoryAdapter {
   health(): Promise<HealthResult>
   /** Authenticated Cognee user behind the API key, when the transport can read it. */
   probePrincipal?(): Promise<string | undefined>
+  /** Read-only dataset/record inventory for the settings page. */
+  inventory?(signal?: AbortSignal): Promise<MemoryInventory>
 }
 
 /** Caller identity available at a tool call or hook boundary. */

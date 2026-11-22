@@ -37,6 +37,8 @@ export const SETTINGS_ENV = Object.freeze({
   apiBaseUrl: 'COGNEE_MEMORY_API_BASE_URL',
   mcpUrl: 'COGNEE_MEMORY_MCP_URL',
   enabled: 'COGNEE_MEMORY_ENABLED',
+  autoRecall: 'COGNEE_MEMORY_AUTO_RECALL',
+  autoWrite: 'COGNEE_MEMORY_AUTO_WRITE',
 })
 /** Credential for the settings routes themselves (never the Cognee key). */
 export const SETTINGS_TOKEN_ENV = 'COGNEE_MEMORY_SETTINGS_TOKEN'
@@ -55,6 +57,8 @@ export interface StoredSettings {
   /** `null` records a deliberate clear, so it also outranks the environment. */
   readonly mcpUrl?: string | null
   readonly enabled?: boolean
+  readonly autoRecall?: boolean
+  readonly autoWrite?: boolean
   readonly updatedAt?: string
 }
 
@@ -63,9 +67,13 @@ export interface SettingsStatus {
   readonly endpoint: string
   readonly mcpUrl: string | undefined
   readonly enabled: boolean
+  readonly autoRecall: boolean
+  readonly autoWrite: boolean
   readonly sources: {
     readonly apiBaseUrl: 'stored' | 'env' | 'profile' | 'default'
     readonly mcpUrl: 'stored' | 'env' | 'profile' | 'none'
+    readonly autoRecall: 'stored' | 'env' | 'profile'
+    readonly autoWrite: 'stored' | 'env' | 'profile'
   }
   /** The Cognee credential presence, never its value. */
   readonly keyVar: string
@@ -109,11 +117,23 @@ export function parseStoredSettings(
     apiBaseUrl?: string
     mcpUrl?: string | null
     enabled?: boolean
+    autoRecall?: boolean
+    autoWrite?: boolean
     updatedAt?: string
   } = { version: 1 }
 
   for (const key of Object.keys(raw)) {
-    if (!['version', 'apiBaseUrl', 'mcpUrl', 'enabled', 'updatedAt'].includes(key)) {
+    if (
+      ![
+        'version',
+        'apiBaseUrl',
+        'mcpUrl',
+        'enabled',
+        'autoRecall',
+        'autoWrite',
+        'updatedAt',
+      ].includes(key)
+    ) {
       errors.push(`unknown key "${key}"`)
     }
   }
@@ -135,6 +155,14 @@ export function parseStoredSettings(
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled === 'boolean') settings.enabled = raw.enabled
     else errors.push('enabled must be a boolean')
+  }
+  if (raw.autoRecall !== undefined) {
+    if (typeof raw.autoRecall === 'boolean') settings.autoRecall = raw.autoRecall
+    else errors.push('autoRecall must be a boolean')
+  }
+  if (raw.autoWrite !== undefined) {
+    if (typeof raw.autoWrite === 'boolean') settings.autoWrite = raw.autoWrite
+    else errors.push('autoWrite must be a boolean')
   }
   if (raw.updatedAt !== undefined) {
     if (typeof raw.updatedAt === 'string') settings.updatedAt = raw.updatedAt
@@ -204,12 +232,24 @@ export class SettingsStore {
               ? 'none'
               : 'profile'
 
+    const autoSource = (stored: boolean | undefined, envValue: boolean | undefined): 'stored' | 'env' | 'profile' =>
+      stored !== undefined ? 'stored' : envValue !== undefined ? 'env' : 'profile'
+    const envAutoRecall = envFlag(this.env[SETTINGS_ENV.autoRecall])
+    const envAutoWrite = envFlag(this.env[SETTINGS_ENV.autoWrite])
+
     return {
       filePath: this.filePath,
       endpoint: this.effective.apiBaseUrl,
       mcpUrl: effectiveMcp,
       enabled: this.effective.enabled,
-      sources: { apiBaseUrl: apiSource, mcpUrl: mcpSource },
+      autoRecall: this.effective.autoRecall,
+      autoWrite: this.effective.autoWrite,
+      sources: {
+        apiBaseUrl: apiSource,
+        mcpUrl: mcpSource,
+        autoRecall: autoSource(this.stored.autoRecall, envAutoRecall),
+        autoWrite: autoSource(this.stored.autoWrite, envAutoWrite),
+      },
       keyVar: this.baseConfig.apiTokenEnv,
       keySet: (this.env[this.baseConfig.apiTokenEnv] ?? '').trim() !== '',
       warnings: [...this.warnings],
@@ -243,11 +283,19 @@ export class SettingsStore {
     const enabled = input.enabled === true || input.enabled === 'true' || input.enabled === 'on'
     if (errors.length > 0 || !apiBaseUrl.ok) return { ok: false, errors }
 
+    const previous = this.read()
+    const toggle = (raw: unknown): boolean | undefined => {
+      if (raw === true || raw === 'true' || raw === 'on') return true
+      if (raw === false || raw === 'false' || raw === 'off') return false
+      return undefined
+    }
     const settings: StoredSettings = {
       version: 1,
       apiBaseUrl: apiBaseUrl.url,
       mcpUrl,
       enabled,
+      autoRecall: toggle(input.autoRecall) ?? previous.autoRecall ?? true,
+      autoWrite: toggle(input.autoWrite) ?? previous.autoWrite ?? true,
       updatedAt: this.clock().toISOString(),
     }
 
@@ -282,6 +330,8 @@ export class SettingsStore {
     const envApi = this.envApiBaseUrl()
     const envMcp = validateCogneeUrl(this.env[SETTINGS_ENV.mcpUrl] ?? '')
     const envEnabled = envFlag(this.env[SETTINGS_ENV.enabled])
+    const envAutoRecall = envFlag(this.env[SETTINGS_ENV.autoRecall])
+    const envAutoWrite = envFlag(this.env[SETTINGS_ENV.autoWrite])
 
     const patch: Record<string, unknown> = {}
     if (this.stored.apiBaseUrl !== undefined) patch.apiBaseUrl = this.stored.apiBaseUrl
@@ -293,6 +343,12 @@ export class SettingsStore {
 
     if (this.stored.enabled !== undefined) patch.enabled = this.stored.enabled
     else if (envEnabled !== undefined) patch.enabled = envEnabled
+
+    if (this.stored.autoRecall !== undefined) patch.autoRecall = this.stored.autoRecall
+    else if (envAutoRecall !== undefined) patch.autoRecall = envAutoRecall
+
+    if (this.stored.autoWrite !== undefined) patch.autoWrite = this.stored.autoWrite
+    else if (envAutoWrite !== undefined) patch.autoWrite = envAutoWrite
 
     try {
       return parseConfig({ ...this.baseConfig, ...patch })
@@ -309,7 +365,9 @@ export class SettingsStore {
     if (
       previous.apiBaseUrl === this.effective.apiBaseUrl &&
       previous.mcpUrl === this.effective.mcpUrl &&
-      previous.enabled === this.effective.enabled
+      previous.enabled === this.effective.enabled &&
+      previous.autoRecall === this.effective.autoRecall &&
+      previous.autoWrite === this.effective.autoWrite
     ) {
       return
     }
@@ -337,7 +395,13 @@ export class SettingsStore {
     if (stamp === this.stamp && stamp !== undefined) return
     this.stamp = stamp
     if (stamp === undefined) {
-      if (this.stored.apiBaseUrl !== undefined || this.stored.enabled !== undefined || this.stored.mcpUrl !== undefined) {
+      if (
+        this.stored.apiBaseUrl !== undefined ||
+        this.stored.enabled !== undefined ||
+        this.stored.mcpUrl !== undefined ||
+        this.stored.autoRecall !== undefined ||
+        this.stored.autoWrite !== undefined
+      ) {
         this.stored = { version: 1 }
         this.applyEffective()
       }

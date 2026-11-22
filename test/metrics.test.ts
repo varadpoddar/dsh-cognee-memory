@@ -26,6 +26,28 @@ describe('Metrics', () => {
     metrics.reset()
     expect(metrics.snapshot()).toEqual({
       counters: expect.objectContaining({ 'recall.requests': 0 }),
+      samples: {
+        'recall.latencyMs': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
+        'prefetch.latencyMs': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
+        'context.usage': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
+      },
     })
+  })
+
+  it('summarizes bounded latency samples as p50/p95', () => {
+    const metrics = new Metrics()
+    for (let value = 1; value <= 100; value += 1) metrics.observe('recall.latencyMs', value)
+    metrics.observe('recall.latencyMs', Number.NaN)
+    const summary = metrics.snapshot().samples['recall.latencyMs']
+    expect(summary.count).toBe(100)
+    expect(summary.p50).toBe(50)
+    expect(summary.p95).toBe(95)
+    expect(summary.max).toBe(100)
+  })
+
+  it('keeps the sample reservoir bounded', () => {
+    const metrics = new Metrics()
+    for (let value = 0; value < 1_000; value += 1) metrics.observe('context.usage', value)
+    expect(metrics.snapshot().samples['context.usage'].count).toBe(256)
   })
 })
