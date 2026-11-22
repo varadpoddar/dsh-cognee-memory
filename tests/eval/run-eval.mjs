@@ -408,7 +408,7 @@ async function main() {
     status: serviceState === 'active' && eCorrect ? 'PASS' : 'FAIL',
     summary: `service ${serviceState}; fresh process after the restart answered ${eCorrect ? 'with' : 'without'} the stored code.`,
     evidence: `systemctl is-active: ${serviceState}\nfinal: ${eRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
-    commands: ['systemctl restart deepseek-harness', 'dsh headless --json "<question>"'],
+    commands: ['systemctl restart deepseek-harness', 'dsh --profile headless --patch patch-no-tools.yml --json "<question>"'],
   })
 
   // K — project + principal isolation.
