@@ -82,18 +82,33 @@ try {
     current = await health()
   }
   wait = { ms: Date.now() - started, status: current.status, body: current.body }
-  run = askHarness()
-  const events = run.out.split('\n').map((line) => { try { return JSON.parse(line) } catch { return null } })
-  const finalEvent = events.find((event) => event?.type === 'final')
-  const answer = typeof finalEvent?.text === 'string' ? finalEvent.text : tail(run.out)
-  const toolEvents = events.filter((event) => event?.type === 'tool_call').length
+
+  // Cognee's /health turns ready before its search index is warm; a bounded
+  // retry measures the real recall-after-restart path instead of the socket.
+  let attempts = 0
+  let answer = ''
+  let toolEvents = 0
+  let recalled = false
+  const recallStarted = Date.now()
+  for (let attempt = 1; attempt <= 3 && !recalled; attempt += 1) {
+    attempts = attempt
+    run = askHarness()
+    const events = run.out.split('\n').map((line) => { try { return JSON.parse(line) } catch { return null } })
+    const finalEvent = events.find((event) => event?.type === 'final')
+    answer = typeof finalEvent?.text === 'string' ? finalEvent.text : tail(run.out)
+    toolEvents = events.filter((event) => event?.type === 'tool_call').length
+    recalled = run.ok && answer.includes(EXPECTED)
+    if (!recalled && attempt < 3) await sleep(20_000)
+  }
+  const recallWaitMs = Date.now() - recallStarted
   report.scenarios.push({
     id: 'F',
     title: 'Recall after docker restart cognee (CT 106)',
-    status: restart === 'cognee' && current.status === 200 && run.ok && answer.includes(EXPECTED) ? 'PASS' : 'FAIL',
+    status: restart === 'cognee' && wait.status === 200 && recalled ? 'PASS' : 'FAIL',
     summary:
-      `container restarted (${restart}); /health back in ${wait.ms} ms; a fresh harness process ` +
-      `${answer.includes(EXPECTED) ? 'recalled' : 'did NOT recall'} the pre-restart codeword.`,
+      `container restarted (${restart}); /health back in ${wait.ms} ms; recall ${recalled ? 'succeeded' : 'did NOT succeed'} ` +
+      `after ${attempts} attempt(s) / ${recallWaitMs} ms; a fresh harness process ` +
+      `${recalled ? 'carried' : 'did NOT carry'} the pre-restart codeword.`,
     evidence:
       `before /health: ${JSON.stringify(before)}\n` +
       `docker restart output: ${restart}\n` +
