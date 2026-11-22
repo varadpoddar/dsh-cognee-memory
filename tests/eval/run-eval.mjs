@@ -402,16 +402,19 @@ async function main() {
     serviceState = `restart-failed: ${String(error).slice(0, 120)}`
   }
   await sleep(2_000)
-  const eRun = runHeadless(dPrompt, patches.memoryOnly, 180_000)
-  const eCorrect = eRun.final.includes(cToken)
+  // E isolates restart persistence from the D retrieval miss: the amber code
+  // is a fact that A already recalled prefetch-only.
+  const ePrompt = facts[0].question
+  const eRun = runHeadless(ePrompt, patches.noTools, 180_000)
+  const eCorrect = eRun.final.includes(facts[0].token)
   console.log(JSON.stringify({ step: 'E', correct: eCorrect, service: serviceState }))
   addScenario({
     id: 'E',
     title: 'Recall after systemctl restart deepseek-harness.service',
     status: serviceState === 'active' && eCorrect ? 'PASS' : 'FAIL',
-    summary: `service ${serviceState}; fresh process after the restart answered ${eCorrect ? 'with' : 'without'} the stored code.`,
+    summary: `service ${serviceState}; fresh process after the restart answered ${eCorrect ? 'with' : 'without'} the pre-restart amber code.`,
     evidence: `systemctl is-active: ${serviceState}\ntool_events: ${eRun.toolCalls} [${eRun.toolNames.join(', ')}]\nfinal: ${eRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
-    commands: ['systemctl restart deepseek-harness', 'dsh --profile headless --patch patch-memory-only.yml --json "<question>"'],
+    commands: ['systemctl restart deepseek-harness', 'dsh --profile headless --patch patch-no-tools.yml --json "<amber question>"'],
   })
 
   // K — project + principal isolation.
