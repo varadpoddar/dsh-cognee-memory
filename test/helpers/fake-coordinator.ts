@@ -49,6 +49,7 @@ export function createHarness(
   const config = parseConfig({
     transport: 'rest',
     apiBaseUrl: 'http://127.0.0.1:9',
+    authMode: 'none',
     requestTimeoutMs: 1_000,
     maxRetries: 0,
     retryBackoffMs: 0,

@@ -3,6 +3,7 @@
 export type MetricName =
   | 'recall.requests'
   | 'recall.failures'
+  | 'recall.degraded'
   | 'remember.requests'
   | 'remember.failures'
   | 'remember.deduplicated'
@@ -18,6 +19,7 @@ export type MetricName =
 const METRIC_NAMES: readonly MetricName[] = [
   'recall.requests',
   'recall.failures',
+  'recall.degraded',
   'remember.requests',
   'remember.failures',
   'remember.deduplicated',

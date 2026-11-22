@@ -11,14 +11,19 @@ describe('config validation', () => {
     expect(DEFAULT_CONFIG).toMatchObject({
       enabled: true,
       transport: 'auto',
-      apiBaseUrl: 'http://127.0.0.1:8000',
-      authMode: 'none',
-      apiTokenEnv: 'COGNEE_API_TOKEN',
+      apiBaseUrl: 'http://127.0.0.1:8000/api/v1',
+      // The live instance runs with ENABLE_BACKEND_ACCESS_CONTROL=true, so an
+      // unauthenticated default would fail every call.
+      authMode: 'api-key',
+      apiTokenEnv: 'COGNEE_API_KEY',
       failureMode: 'open',
       circuitBreakerEnabled: true,
       maxRetries: 2,
-      requestTimeoutMs: 15_000,
+      requestTimeoutMs: 120_000,
     })
+    expect(DEFAULT_CONFIG.recall.searchType).toBe('CHUNKS')
+    expect(DEFAULT_CONFIG.recall.maxRecallLatencyMs).toBe(3_000)
+    expect(DEFAULT_CONFIG.ingestion.timeoutMs).toBeGreaterThan(0)
     expect(DEFAULT_CONFIG.prompt.maxItems).toBeGreaterThan(0)
     expect(DEFAULT_CONFIG.prompt.maxTokens).toBeGreaterThan(0)
   })

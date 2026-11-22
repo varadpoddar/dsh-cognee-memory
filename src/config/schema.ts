@@ -40,19 +40,25 @@ export const CogneeMemoryConfigSchema = z
     /** Preferred transport. `auto` uses MCP when `mcpUrl` is set, otherwise REST. */
     transport: transportSchema.default('auto'),
 
-    /** Cognee REST root, without a trailing slash requirement. */
-    apiBaseUrl: httpUrl.default('http://127.0.0.1:8000'),
+    /** Cognee REST root. The client resolves the verified `/api/v1/...` paths against it. */
+    apiBaseUrl: httpUrl.default('http://127.0.0.1:8000/api/v1'),
 
     /** Streamable HTTP MCP endpoint. Required only when transport resolves to `mcp-http`. */
     mcpUrl: httpUrl.optional(),
 
-    authMode: authModeSchema.default('none'),
+    /** Cognee 1.6.10 with EBAC enabled rejects every call without credentials. */
+    authMode: authModeSchema.default('api-key'),
 
     /** Environment variable that holds the token. The token itself never enters config. */
-    apiTokenEnv: nonEmpty.default('COGNEE_API_TOKEN'),
+    apiTokenEnv: nonEmpty.default('COGNEE_API_KEY'),
 
     connectionTimeoutMs: z.number().int().min(100).max(120_000).default(2_000),
-    requestTimeoutMs: z.number().int().min(100).max(120_000).default(15_000),
+    /**
+     * Cognee's `/remember` runs add+cognify synchronously and took 2.0-3.0 s on
+     * the live instance; `GRAPH_COMPLETION` search took 4.2-5.9 s. Keep a wide
+     * ceiling here and bound recall separately with `recall.maxRecallLatencyMs`.
+     */
+    requestTimeoutMs: z.number().int().min(100).max(600_000).default(120_000),
     maxRetries: z.number().int().min(0).max(5).default(2),
     retryBackoffMs: z.number().int().min(0).max(30_000).default(250),
     circuitBreakerEnabled: z.boolean().default(true),
@@ -64,6 +70,32 @@ export const CogneeMemoryConfigSchema = z
      * `closed` surfaces typed errors. Writes always surface real failures.
      */
     failureMode: failureModeSchema.default('open'),
+
+    /**
+     * Read path. `maxRecallLatencyMs` is a hard budget: on expiry recall returns
+     * no hits in `open` failure mode instead of stalling a turn. Live latencies
+     * observed: CHUNKS 0.21 s, GRAPH_COMPLETION 4.2 s, /recall 5.6 s.
+     */
+    recall: z
+      .object({
+        searchType: z
+          .enum(['CHUNKS', 'GRAPH_COMPLETION', 'HYBRID_COMPLETION', 'RAG_COMPLETION', 'SUMMARIES'])
+          .default('CHUNKS'),
+        maxRecallLatencyMs: z.number().int().min(100).max(120_000).default(3_000),
+      })
+      .prefault({}),
+
+    /**
+     * Write path completion. `/remember` is synchronous on the live instance,
+     * but a 200 is not proof: the adapter polls pipeline + memory status until
+     * `searchable:true` or this budget expires.
+     */
+    ingestion: z
+      .object({
+        timeoutMs: z.number().int().min(500).max(900_000).default(180_000),
+        pollMs: z.number().int().min(50).max(30_000).default(500),
+      })
+      .prefault({}),
 
     /** Optional identities used to derive project/team scope ids. */
     scopeDefaults: z

@@ -213,31 +213,34 @@ by `apply()` for tests. Cordis owns the final invocation on fiber disposal.
 - `failureMode: open` makes prompt-side recall degrade to empty; `closed`
   surfaces typed errors. Explicit writes/forgets always surface failures.
 
-### 5.1 Cognee API status — UNVERIFIED
+### 5.1 Cognee API status — VERIFIED LIVE (2026-11-21)
 
-No Cognee 1.6 API documentation is archived in this repository, and no server
-was contacted. Every REST path and MCP tool name is centralized in
+The REST paths and response shapes below were exercised against the live instance
+(Cognee `1.6.10-local`, `http://10.20.10.15:8000`, EBAC on) and are recorded in
 `src/adapters/cognee-paths.ts` under `COGNEE_API_VERIFICATION` with
-`verified: false`. The adapter tolerates several response envelopes. Phase 2
-must verify these against the target Cognee deployment before enabling live use:
+`verified: true`. See `docs/LIVE_INTEGRATION.md` for the verbatim excerpts.
 
 ```
-GET    /health                         (UNVERIFIED)
-POST   /api/v1/add                    (UNVERIFIED)
-POST   /api/v1/search                 (UNVERIFIED)
-GET    /api/v1/datasets               (UNVERIFIED)
-DELETE /api/v1/delete                 (UNVERIFIED; per-memory delete may not exist)
-POST   /api/v1/prune                  (UNVERIFIED; not used by Phase 1)
+GET    /health                                   (verified: {"status":"ready",…})
+GET    /api/v1/users/me                          (verified; ownership check)
+GET    /api/v1/datasets                          (verified)
+POST   /api/v1/datasets                          (verified; {name} -> {id,…})
+GET    /api/v1/datasets/{id}/data                (verified; contentHash = md5(text))
+GET    /api/v1/datasets/{id}/processing-status   (verified)
+GET    /api/v1/datasets/status?dataset=&pipeline= (verified; DATASET_PROCESSING_COMPLETED)
+GET    /api/v1/datasets/status/memory?dataset=   (verified; state/searchable)
+POST   /api/v1/remember                          (verified; multipart, datasetId)
+POST   /api/v1/search                            (verified; searchType/datasetIds/topK)
+POST   /api/v1/forget                            (verified; {datasetId,dataId})
 ```
 
+Deprecated/removed from the adapter: `DELETE /api/v1/delete` and `POST /api/v1/prune`.
 `forget` treats 404/405/501 as `UNSUPPORTED_OPERATION` and **never** falls back
 to deleting a dataset. There is no dataset-delete path in the constants module.
 
-MCP support assumes Streamable HTTP JSON-RPC (`initialize` →
-`notifications/initialized` → `tools/call`) and Cognee tool names that are also
-marked UNVERIFIED. DSH's first-party `@deepseek-ai/dsh-mcp-client` remains the
-lower-risk route if Cognee exposes a compatible MCP endpoint; the built-in
-adapter exists so the plugin is not blocked on that decision.
+MCP support still assumes Streamable HTTP JSON-RPC (`initialize` →
+`notifications/initialized` → `tools/call`) with unverified tool names; it was not
+exercised against a live endpoint and REST is the verified transport.
 
 Both adapters parse responses defensively. A row whose dataset name does not
 match one of the requested scopes is dropped rather than labelled with the

@@ -14,6 +14,9 @@ function config(baseUrl: string, overrides: Record<string, unknown> = {}): Cogne
   return parseConfig({
     transport: 'rest',
     apiBaseUrl: baseUrl,
+    // These tests exercise transport mechanics against an unauthenticated mock;
+    // the live Cognee deployment is configured with authMode: 'api-key'.
+    authMode: 'none',
     requestTimeoutMs: 1_000,
     maxRetries: 0,
     retryBackoffMs: 0,

@@ -23,7 +23,21 @@ export interface HttpRequestOptions {
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   /** Path relative to the configured base URL; '' targets the base URL itself. */
   readonly path: string
+  /** JSON body. Ignored when `form` is set. */
   readonly body?: unknown
+  /**
+   * Multipart form body. Cognee's `/remember`, `/add` and `/update` accept
+   * `multipart/form-data` only: a JSON body is silently ignored and the request
+   * fails with "Either datasetId or datasetName must be provided" (observed).
+   */
+  readonly form?: FormData
+  /** Query-string parameters; `undefined` values are omitted. */
+  readonly query?: Readonly<Record<string, string | number | boolean | undefined>>
+  /**
+   * Resolve `path` against the origin of the base URL instead of the base URL
+   * itself. Used for `GET /health`, which lives outside the `/api/v1` prefix.
+   */
+  readonly originRelative?: boolean
   readonly signal?: AbortSignal
   /** Operation name used in safe error details and unsupported-operation errors. */
   readonly operation: string
@@ -31,6 +45,8 @@ export interface HttpRequestOptions {
   readonly headers?: Readonly<Record<string, string>>
   /** Override the configured request timeout (e.g. a short connection probe). */
   readonly timeoutMs?: number
+  /** Override the configured retry budget (recall uses 0 to honour its latency cap). */
+  readonly maxRetries?: number
 }
 
 export interface HttpResult {
@@ -40,11 +56,35 @@ export interface HttpResult {
   readonly url: string
 }
 
-/** Join a base URL and path. A path of '' preserves the base URL exactly. */
+/**
+ * Join a base URL and path. A path of '' preserves the base URL exactly.
+ *
+ * Cognee's API paths are absolute (`/api/v1/...`). Operators commonly configure
+ * the base as either `http://host:8000` or `http://host:8000/api/v1` (the form
+ * used in the deployment notes), so a trailing `/api/v1` on the base is
+ * normalized away to avoid `/api/v1/api/v1/...`.
+ */
 export function joinEndpoint(baseUrl: string, path: string): string {
   if (path === '') return baseUrl
-  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
-  return new URL(path.replace(/^\/+/, ''), base).toString()
+  const base = new URL(baseUrl)
+  let basePath = base.pathname.replace(/\/+$/, '')
+  if (basePath.endsWith('/api/v1')) basePath = basePath.slice(0, -'/api/v1'.length)
+  const suffix = path.replace(/^\/+/, '')
+  return `${base.origin}${basePath}/${suffix}`
+}
+
+/** Resolve a request URL, including query parameters and origin-relative paths. */
+export function buildUrl(baseUrl: string, options: HttpRequestOptions): string {
+  const joined =
+    options.originRelative === true
+      ? new URL(options.path, new URL(baseUrl).origin).toString()
+      : joinEndpoint(baseUrl, options.path)
+  if (options.query === undefined) return joined
+  const url = new URL(joined)
+  for (const [key, value] of Object.entries(options.query)) {
+    if (value !== undefined) url.searchParams.set(key, String(value))
+  }
+  return url.toString()
 }
 
 function timeoutError(message = 'memory backend request timed out'): MemoryError {
@@ -121,15 +161,18 @@ export class HttpJsonClient {
   }
 
   async request(options: HttpRequestOptions): Promise<HttpResult> {
-    const url = joinEndpoint(this.baseUrl, options.path)
+    const url = buildUrl(this.baseUrl, options)
     const authHeaders = buildAuthHeaders(this.config, this.resolver)
     const headers: Record<string, string> = {
       accept: 'application/json',
-      ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+      ...(options.body === undefined || options.form !== undefined
+        ? {}
+        : { 'content-type': 'application/json' }),
       ...authHeaders,
       ...options.headers,
     }
-    const body = options.body === undefined ? undefined : JSON.stringify(options.body)
+    const body: BodyInit | undefined =
+      options.form !== undefined ? options.form : options.body === undefined ? undefined : JSON.stringify(options.body)
 
     const attempt = async (): Promise<HttpResult> => {
       if (this.breaker !== undefined) {
@@ -176,7 +219,7 @@ export class HttpJsonClient {
     }
 
     return withRetry(attempt, {
-      maxRetries: this.config.maxRetries,
+      maxRetries: options.maxRetries ?? this.config.maxRetries,
       backoffMs: this.config.retryBackoffMs,
       signal: options.signal,
       sleep: this.sleep,

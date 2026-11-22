@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { JsonValue, MemoryRecord, RecallHit, ScopeRef } from '../types.js'
 import { scopeKey } from '../memory/scopes.js'
+import { isPipelineComplete, isPipelineFailed } from './cognee-paths.js'
 
 /** True for a lossless JSON object. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,39 +115,210 @@ function matchScope(name: string | undefined, scopes: readonly ScopeRef[]): Scop
   return undefined
 }
 
-export interface ParsedRecallRow {
-  readonly record: MemoryRecord
-  readonly score: number
+function scoreOf(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0
+  return Math.min(1, Math.max(0, value))
 }
 
-/** Parse a Cognee add/remember response tolerantly without trusting its shape. */
+function createdAtOf(value: unknown, fallback: string): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    // Observed live: `created_at` is epoch milliseconds (e.g. 1795307390969).
+    const ms = value > 1e12 ? value : value * 1000
+    const date = new Date(ms)
+    return Number.isNaN(date.getTime()) ? fallback : date.toISOString()
+  }
+  if (typeof value === 'string' && !Number.isNaN(Date.parse(value))) return value
+  return fallback
+}
+
+export interface ParsedRemember {
+  readonly id: string
+  readonly deduplicated: boolean
+  readonly createdAt: string
+  readonly datasetId?: string
+  readonly pipelineRunId?: string
+  readonly status?: string
+  readonly dataIds: readonly string[]
+}
+
+/**
+ * Parse a Cognee `/remember` (or `/add`, `/cognify`) response.
+ *
+ * Observed `/remember` shape (live, 2026-11-21):
+ * `{status:"completed", dataset_name, dataset_id, pipeline_run_id,
+ *   items_processed, elapsed_seconds, items:[{id}], improve:{...}}`
+ * `/add` and `/cognify` answer `{status:"PipelineRunCompleted", dataset_id,
+ *   pipeline_run_id, data_ingestion_info:[...], data_ids:[uuid]}` keyed by
+ * dataset for `/cognify`.
+ */
 export function parseRememberResponse(
   response: unknown,
   scope: ScopeRef,
   fallbackId: string,
   nowIso: string,
-): { id: string; deduplicated: boolean; createdAt: string } {
+): ParsedRemember {
   const containers: Record<string, unknown>[] = []
   if (isRecord(response)) {
     containers.push(response)
     if (isRecord(response.data)) containers.push(response.data)
+    // `/cognify` answers `{<dataset_id>: PipelineRunInfo}`.
+    for (const value of Object.values(response)) {
+      if (isRecord(value) && value !== response.data) containers.push(value)
+    }
     if (Array.isArray(response.items) && isRecord(response.items[0])) containers.push(response.items[0])
     if (Array.isArray(response.data) && isRecord(response.data[0])) containers.push(response.data[0])
   }
-  let id: string | undefined
+  const dataIds: string[] = []
   for (const container of containers) {
-    id = pickString(container, ID_KEYS)
-    if (id !== undefined) break
+    for (const key of ['items', 'data_ids']) {
+      const list = container[key]
+      if (!Array.isArray(list)) continue
+      for (const entry of list) {
+        if (typeof entry === 'string' && entry !== '') dataIds.push(entry)
+        else if (isRecord(entry)) {
+          const id = pickString(entry, ID_KEYS)
+          if (id !== undefined) dataIds.push(id)
+        }
+      }
+    }
+  }
+  let id: string | undefined = dataIds[0]
+  if (id === undefined) {
+    for (const container of containers) {
+      id = pickString(container, ID_KEYS)
+      if (id !== undefined) break
+    }
   }
   const deduplicated =
     containers.some((container) => pickBoolean(container, ['deduplicated', 'duplicate']) === true)
   const createdAt =
     containers.map((container) => pickString(container, DATE_KEYS)).find((value) => value !== undefined) ??
     nowIso
-  return { id: id ?? fallbackId, deduplicated, createdAt }
+  let datasetId: string | undefined
+  let pipelineRunId: string | undefined
+  let status: string | undefined
+  for (const container of containers) {
+    datasetId ??= pickString(container, ['dataset_id', 'datasetId'])
+    pipelineRunId ??= pickString(container, ['pipeline_run_id', 'pipelineRunId'])
+    status ??= pickString(container, ['status'])
+  }
+  return {
+    id: id ?? fallbackId,
+    deduplicated,
+    createdAt,
+    dataIds,
+    ...(datasetId === undefined ? {} : { datasetId }),
+    ...(pipelineRunId === undefined ? {} : { pipelineRunId }),
+    ...(status === undefined ? {} : { status }),
+  }
 }
 
-/** Parse a search response into scope-tagged hits. Unknown/foreign datasets are dropped. */
+export interface SearchGroup {
+  readonly datasetId?: string
+  readonly datasetName?: string
+  readonly rows: readonly unknown[]
+}
+
+/**
+ * Split a `/search` response into dataset groups.
+ *
+ * Observed live shape:
+ * `[{dataset_id, dataset_name, dataset_tenant_id, search_result: [row, ...]}]`
+ * where a row is either an object (CHUNKS: `{id, text, score, document_id,
+ * document_name, created_at, belongs_to_set, ...}`) or a plain string
+ * (GRAPH_COMPLETION: the synthesized answer).
+ */
+export function parseSearchGroups(response: unknown): SearchGroup[] {
+  if (Array.isArray(response)) {
+    const groups: SearchGroup[] = []
+    let grouped = false
+    for (const entry of response) {
+      if (
+        isRecord(entry) &&
+        (entry.dataset_id !== undefined || entry.dataset_name !== undefined) &&
+        Array.isArray(entry.search_result)
+      ) {
+        grouped = true
+        const datasetId = pickString(entry, ['dataset_id', 'datasetId'])
+        const datasetName = pickString(entry, ['dataset_name', 'datasetName'])
+        groups.push({
+          rows: entry.search_result as unknown[],
+          ...(datasetId === undefined ? {} : { datasetId }),
+          ...(datasetName === undefined ? {} : { datasetName }),
+        })
+      }
+    }
+    if (grouped) return groups
+    // Flat row list (legacy/other transports).
+    return [{ rows: response }]
+  }
+  return [{ rows: extractRows(response) }]
+}
+
+/**
+ * Parse `/search` into scope-tagged hits. Rows are only accepted when their
+ * dataset resolves to a scope the caller asked for; anything else is dropped,
+ * so a foreign dataset can never be mislabeled as authorized.
+ */
+export function parseSearchResponse(
+  response: unknown,
+  scopes: readonly ScopeRef[],
+  nowIso: string,
+  maxRows = 100,
+  scopeByDatasetId?: ReadonlyMap<string, ScopeRef>,
+): RecallHit[] {
+  const hits: RecallHit[] = []
+  for (const group of parseSearchGroups(response)) {
+    const byId = group.datasetId === undefined ? undefined : scopeByDatasetId?.get(group.datasetId)
+    const scope = byId ?? matchScope(group.datasetName, scopes)
+    if (scope === undefined) continue
+    group.rows.forEach((row, index) => {
+      if (hits.length >= maxRows) return
+      if (typeof row === 'string') {
+        if (row.trim() === '') return
+        hits.push({
+          record: {
+            id: `graph-${createHash('sha256').update(`${scopeKey(scope)}\u0000${row}`).digest('hex').slice(0, 24)}`,
+            text: row,
+            scope,
+            createdAt: nowIso,
+          },
+          score: Math.max(0.05, 1 - index * 0.05),
+        })
+        return
+      }
+      if (!isRecord(row)) return
+      const text = textFrom(row.text) ?? textFrom(row.content)
+      if (text === undefined || text.trim() === '') return
+      const dataId = pickString(row, ['document_id', 'documentId', 'data_id', 'dataId'])
+      const rowId = pickString(row, ID_KEYS)
+      const id =
+        dataId ??
+        rowId ??
+        `chunk-${createHash('sha256').update(`${scopeKey(scope)}\u0000${text}`).digest('hex').slice(0, 24)}`
+      const tags = Array.isArray(row.belongs_to_set)
+        ? row.belongs_to_set.filter((tag): tag is string => typeof tag === 'string').slice(0, 16)
+        : isRecord(row.external_metadata) && Array.isArray(row.external_metadata.node_set)
+          ? (row.external_metadata.node_set as unknown[])
+              .filter((tag): tag is string => typeof tag === 'string')
+              .slice(0, 16)
+          : undefined
+      hits.push({
+        record: {
+          id,
+          text,
+          scope,
+          createdAt: createdAtOf(row.created_at ?? row.createdAt, nowIso),
+          ...(tags === undefined || tags.length === 0 ? {} : { tags }),
+        },
+        score: scoreOf(pickNumber(row, SCORE_KEYS)),
+      })
+    })
+  }
+  return hits
+}
+
+/** Legacy flat-row parser kept for the MCP transport, which may return plain JSON. */
 export function parseRecallResponse(
   response: unknown,
   scopes: readonly ScopeRef[],
@@ -166,35 +338,129 @@ export function parseRecallResponse(
         .update(`${scopeKey(scope)}\u0000${text}`)
         .digest('hex')
         .slice(0, 24)}`
-    const rawScore = pickNumber(row, SCORE_KEYS)
-    const score = rawScore === undefined ? 0.5 : Math.min(1, Math.max(0, rawScore))
-    const createdAt =
-      pickString(row, DATE_KEYS) !== undefined &&
-      !Number.isNaN(Date.parse(pickString(row, DATE_KEYS) as string))
-        ? (pickString(row, DATE_KEYS) as string)
-        : nowIso
-    const rawTags = row.tags
-    const tags = Array.isArray(rawTags)
-      ? rawTags.filter((tag): tag is string => typeof tag === 'string').slice(0, 16)
-      : undefined
     hits.push({
       record: {
         id,
         text,
         scope,
-        createdAt,
-        ...(tags === undefined || tags.length === 0 ? {} : { tags }),
+        createdAt: createdAtOf(row.created_at ?? row.createdAt, nowIso),
       },
-      score,
+      score: scoreOf(pickNumber(row, SCORE_KEYS)),
     })
     if (hits.length >= maxRows) break
   }
   return hits
 }
 
-/** Parse a delete response; only an explicit falsy delete marker means "not forgotten". */
+export interface MemoryStatusSnapshot {
+  readonly state?: string
+  readonly searchable: boolean
+  readonly graphReady: boolean
+  readonly errorMessage?: string
+  readonly indexingStatus?: string
+  readonly cognifyStatus?: string
+}
+
+/**
+ * Parse `GET /datasets/status/memory?dataset=`.
+ *
+ * Observed live: `{<dataset_id>:{state:"ready",search_level:"graph",
+ * searchable:true,graph_ready:true,message,indexing_status,cognify_status,
+ * error_class,error_message}}`; `staged` with `searchable:false` before cognify.
+ */
+export function parseMemoryStatus(response: unknown, datasetId: string): MemoryStatusSnapshot {
+  let body: unknown = response
+  if (isRecord(response) && isRecord(response[datasetId])) body = response[datasetId]
+  if (!isRecord(body)) return { searchable: false, graphReady: false }
+  const errorMessage = pickString(body, ['error_message', 'errorMessage'])
+  return {
+    ...(pickString(body, ['state']) === undefined ? {} : { state: pickString(body, ['state']) }),
+    searchable: pickBoolean(body, ['searchable']) === true,
+    graphReady: pickBoolean(body, ['graph_ready', 'graphReady']) === true,
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(pickString(body, ['indexing_status', 'indexingStatus']) === undefined
+      ? {}
+      : { indexingStatus: pickString(body, ['indexing_status', 'indexingStatus']) }),
+    ...(pickString(body, ['cognify_status', 'cognifyStatus']) === undefined
+      ? {}
+      : { cognifyStatus: pickString(body, ['cognify_status', 'cognifyStatus']) }),
+  }
+}
+
+/**
+ * Parse `GET /datasets/status?dataset=&pipeline=`, which answers
+ * `{<dataset_id>:"DATASET_PROCESSING_COMPLETED"}` on the live instance.
+ */
+export function parsePipelineStatus(response: unknown, datasetId: string): string | undefined {
+  if (isRecord(response)) {
+    const direct = response[datasetId]
+    if (typeof direct === 'string') return direct
+    if (isRecord(direct)) return pickString(direct, ['status', 'pipeline_status'])
+    const status = pickString(response, ['status', 'pipeline_status'])
+    if (status !== undefined) return status
+  }
+  return typeof response === 'string' ? response : undefined
+}
+
+/** Parse `GET /datasets/{id}/processing-status` -> `{total,completed,pending,items}`. */
+export function parseProcessingStatus(
+  response: unknown,
+): { total?: number; completed?: number; pending?: number } {
+  if (!isRecord(response)) return {}
+  return {
+    ...(pickNumber(response, ['total']) === undefined ? {} : { total: pickNumber(response, ['total']) }),
+    ...(pickNumber(response, ['completed']) === undefined
+      ? {}
+      : { completed: pickNumber(response, ['completed']) }),
+    ...(pickNumber(response, ['pending']) === undefined ? {} : { pending: pickNumber(response, ['pending']) }),
+  }
+}
+
+export interface DataItem {
+  readonly id: string
+  readonly name?: string
+  readonly contentHash?: string
+}
+
+/** Parse `GET /datasets/{id}/data` -> `[{id,name,contentHash,...}]`. */
+export function parseDataList(response: unknown): DataItem[] {
+  const rows = Array.isArray(response)
+    ? response
+    : isRecord(response) && Array.isArray(response.data)
+      ? response.data
+      : []
+  const items: DataItem[] = []
+  for (const row of rows) {
+    if (!isRecord(row)) continue
+    const id = pickString(row, ['id', 'data_id'])
+    if (id === undefined) continue
+    items.push({
+      id,
+      ...(pickString(row, ['name']) === undefined ? {} : { name: pickString(row, ['name']) }),
+      ...(pickString(row, ['contentHash', 'content_hash']) === undefined
+        ? {}
+        : { contentHash: pickString(row, ['contentHash', 'content_hash']) }),
+    })
+  }
+  return items
+}
+
+/** The live instance stores `contentHash = md5(raw text)`; used to find a deduped write. */
+export function contentHashOf(text: string): string {
+  return createHash('md5').update(text).digest('hex')
+}
+
+/**
+ * Parse a `/forget` response. Live shape:
+ * `{status:"success", dataset_id, data_id, data_record_found:true,
+ *   deleted_nodes, deleted_edges, data_remaining:false, dataset_deleted:false}`.
+ * A missing record is reported as `data_record_found:false` with HTTP 200.
+ */
 export function parseForgetResponse(response: unknown): boolean {
   if (!isRecord(response)) return true
+  if (pickBoolean(response, ['data_record_found', 'dataRecordFound']) === false) return false
+  const status = pickString(response, ['status', 'result'])
+  if (status !== undefined) return /success|deleted|forgotten|ok/i.test(status)
   const deleted = pickBoolean(response, ['deleted', 'forgotten', 'success'])
   return deleted !== false
 }
@@ -213,3 +479,5 @@ export function jsonMetadata(
 ): JsonValue | undefined {
   return metadata === undefined ? undefined : (metadata as JsonValue)
 }
+
+export { isPipelineComplete, isPipelineFailed }

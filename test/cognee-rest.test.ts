@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { parseConfig, type CogneeMemoryConfig } from '../src/config/schema.js'
-import { CogneeRestAdapter, createCogneeRestAdapter } from '../src/adapters/cognee-rest.js'
-import { COGNEE_PATHS } from '../src/adapters/cognee-paths.js'
+import { CogneeRestAdapter } from '../src/adapters/cognee-rest.js'
 import { makeScopeRef, scopeKey } from '../src/memory/scopes.js'
-import { startMockServer, type MockServer } from './helpers/mock-server.js'
+import {
+  startMockServer,
+  type MockServer,
+  type MockServerRequest,
+  type MockServerResponse,
+} from './helpers/mock-server.js'
 
 let server: MockServer | undefined
 
@@ -12,24 +16,159 @@ afterEach(async () => {
   server = undefined
 })
 
+function json(body: unknown, status = 200) {
+  return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+}
+
 function config(baseUrl: string, overrides: Record<string, unknown> = {}): CogneeMemoryConfig {
   return parseConfig({
     transport: 'rest',
-    apiBaseUrl: baseUrl,
-    requestTimeoutMs: 1_000,
+    apiBaseUrl: `${baseUrl}/api/v1`,
+    authMode: 'api-key',
+    apiTokenEnv: 'COGNEE_API_KEY',
+    requestTimeoutMs: 2_000,
     maxRetries: 0,
     retryBackoffMs: 0,
     ...overrides,
   })
 }
 
+const env = { COGNEE_API_KEY: 'test-key' } as NodeJS.ProcessEnv
 const project = makeScopeRef('project', '/workspace/demo')
-const session = makeScopeRef('session', 'session-a')
+const other = makeScopeRef('project', '/workspace/other')
+const USER_ID = '11111111-1111-4111-8111-111111111111'
+const PROJECT_DATASET = '55555555-5555-4555-8555-555555555555'
+const DATA_ID = '44444444-4444-4444-8444-444444444444'
 
-describe('CogneeRestAdapter', () => {
-  it('writes a scoped memory and parses the returned id', async () => {
-    server = await startMockServer(() => ({ body: JSON.stringify({ id: 'mem-1' }) }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
+interface FakeCognee {
+  readonly handler: (request: MockServerRequest) => MockServerResponse | Promise<MockServerResponse>
+  readonly datasets: Array<{ id: string; name: string; ownerId?: string }>
+  readonly data: Map<string, Array<{ id: string; name: string; contentHash: string }>>
+  memoryCalls: number
+}
+
+/** Stateful stand-in for the endpoints the adapter uses, with the observed shapes. */
+function fakeCognee(options: { ownerId?: string; memoryUntilReady?: number } = {}): FakeCognee {
+  const datasets: FakeCognee['datasets'] = []
+  const data: FakeCognee['data'] = new Map()
+  let created = 0
+  const state: FakeCognee = {
+    datasets,
+    data,
+    memoryCalls: 0,
+    handler(request) {
+      const url = new URL(request.url ?? '/', 'http://mock')
+      const path = url.pathname
+      if (path === '/api/v1/users/me') return json({ id: USER_ID, email: 'agent@cognee.agent' })
+      if (path === '/api/v1/datasets' && request.method === 'GET') {
+        return json(datasets.map((dataset) => ({ ...dataset, createdAt: '2026-11-21T00:00:00Z', updatedAt: null })))
+      }
+      if (path === '/api/v1/datasets' && request.method === 'POST') {
+        const body = JSON.parse(request.body) as { name: string }
+        created += 1
+        const dataset = {
+          id: `2222222${created}-2222-4222-8222-222222222222`.slice(0, 36),
+          name: body.name,
+          ownerId: options.ownerId ?? USER_ID,
+        }
+        datasets.push(dataset)
+        return json(dataset)
+      }
+      const dataMatch = /^\/api\/v1\/datasets\/([^/]+)\/data$/.exec(path)
+      if (dataMatch?.[1] !== undefined) {
+        return json(data.get(dataMatch[1]) ?? [])
+      }
+      if (path === '/api/v1/datasets/status/memory') {
+        state.memoryCalls += 1
+        const datasetId = url.searchParams.get('dataset') ?? ''
+        const ready = state.memoryCalls > (options.memoryUntilReady ?? 1)
+        return json({
+          [datasetId]: {
+            state: ready ? 'ready' : 'staged',
+            search_level: ready ? 'graph' : 'none',
+            searchable: ready,
+            graph_ready: ready,
+            message: ready ? 'Memory is fully built.' : 'Run cognify().',
+            indexing_status: 'DATASET_PROCESSING_COMPLETED',
+            cognify_status: ready ? 'DATASET_PROCESSING_COMPLETED' : null,
+            error_class: null,
+            error_message: null,
+          },
+        })
+      }
+      if (path === '/api/v1/datasets/status') {
+        const datasetId = url.searchParams.get('dataset') ?? ''
+        return json({ [datasetId]: 'DATASET_PROCESSING_COMPLETED' })
+      }
+      if (path === '/api/v1/remember' && request.method === 'POST') {
+        const datasetId = /name="datasetId"\r\n\r\n([^\r]+)/.exec(request.body)?.[1] ?? ''
+        const raw = /name="raw_data"\r\n\r\n([\s\S]*?)\r\n--/.exec(request.body)?.[1] ?? ''
+        const id = `3333333${(data.get(datasetId)?.length ?? 0) + 1}-3333-4333-8333-333333333333`.slice(0, 36)
+        const items = data.get(datasetId) ?? []
+        items.push({ id, name: 'text_1', contentHash: 'ignored' })
+        data.set(datasetId, items)
+        return json({
+          status: 'completed',
+          dataset_name: datasets.find((dataset) => dataset.id === datasetId)?.name,
+          dataset_id: datasetId,
+          pipeline_run_id: 'run-1',
+          items_processed: 1,
+          elapsed_seconds: 0.1,
+          items: [{ id }],
+          raw_length: raw.length,
+        })
+      }
+      if (path === '/api/v1/search' && request.method === 'POST') {
+        const body = JSON.parse(request.body) as { datasetIds?: string[]; query: string; topK?: number }
+        return json([
+          {
+            dataset_id: body.datasetIds?.[0],
+            dataset_name: scopeKey(project),
+            dataset_tenant_id: null,
+            search_result: [
+              {
+                id: 'chunk-1',
+                text: 'the deploy target is blue',
+                document_id: DATA_ID,
+                document_name: 'text_1',
+                created_at: 1_795_307_390_969,
+                score: 0.87,
+                belongs_to_set: ['ops'],
+              },
+            ],
+          },
+          {
+            dataset_id: '99999999-9999-4999-8999-999999999999',
+            dataset_name: 'foreign_dataset',
+            search_result: [{ id: 'x', text: 'foreign memory', document_id: 'x', score: 1 }],
+          },
+        ])
+      }
+      if (path === '/api/v1/forget' && request.method === 'POST') {
+        const body = JSON.parse(request.body) as { datasetId: string; dataId: string }
+        return json({
+          status: 'success',
+          dataset_id: body.datasetId,
+          data_id: body.dataId,
+          data_record_found: true,
+          deleted_nodes: 2,
+          deleted_edges: 1,
+          data_remaining: false,
+          dataset_deleted: false,
+        })
+      }
+      if (path === '/health') return json({ status: 'ready', health: 'healthy', version: '1.6.10-local' })
+      return json({ detail: 'not found' }, 404)
+    },
+  }
+  return state
+}
+
+describe('CogneeRestAdapter (verified live contract)', () => {
+  it('creates the dataset first and writes with datasetId, never datasetName', async () => {
+    const fake = fakeCognee()
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
     const result = await adapter.remember({
       text: 'The deploy target is blue.',
       scope: project,
@@ -41,132 +180,185 @@ describe('CogneeRestAdapter', () => {
       },
       dedupeKey: 'dedupe-1',
     })
-    expect(result).toMatchObject({ id: 'mem-1', scope: project, deduplicated: false })
-    const request = server.requests[0]
-    expect(request?.method).toBe('POST')
-    expect(request?.url).toBe(COGNEE_PATHS.add)
-    const body = JSON.parse(request?.body ?? '') as Record<string, unknown>
-    expect(body.data).toBe('The deploy target is blue.')
-    expect(body.datasetName).toBe(scopeKey(project))
-    expect(body.nodeSet).toEqual(['ops'])
-    expect(body.dedupeKey).toBe('dedupe-1')
+    expect(result.id).toBe('33333331-3333-4333-8333-333333333333')
+    expect(result.scope).toBe(project)
+    expect(result.deduplicated).toBe(false)
+    const calls = server.requests.map((request) => `${request.method} ${request.url}`)
+    expect(calls[0]).toBe('GET /api/v1/datasets')
+    expect(calls[1]).toBe('POST /api/v1/datasets')
+    const write = server.requests.find((request) => request.url === '/api/v1/remember')
+    expect(write?.body).toContain('name="datasetId"')
+    expect(write?.body).toContain(fake.datasets[0]?.id ?? 'missing')
+    expect(write?.body).not.toContain('name="datasetName"')
+    expect(write?.headers['x-api-key']).toBe('test-key')
+    expect(write?.headers['content-type']).toContain('multipart/form-data')
   })
 
-  it('falls back to a deterministic local id when the backend omits one', async () => {
-    server = await startMockServer(() => ({ body: '{}' }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
-    const input = {
-      text: 'same text',
-      scope: project,
-      provenance: {
-        kind: 'tool_call' as const,
-        source: 'tool:memory_remember',
-        recordedAt: '2026-01-01T00:00:00.000Z',
-      },
-      dedupeKey: 'stable-key',
-    }
-    const first = await adapter.remember(input)
-    const second = await adapter.remember(input)
-    expect(first.id).toMatch(/^local-/)
-    expect(first.id).toBe(second.id)
-  })
-
-  it('parses recall rows and drops rows from unknown datasets', async () => {
-    server = await startMockServer(() => ({
-      body: JSON.stringify([
-        { id: 'p1', text: 'project memory', dataset_name: scopeKey(project), score: 0.9 },
-        { id: 's1', text: 'session memory', dataset_name: scopeKey(session), score: 1.7 },
-        { id: 'x1', text: 'foreign memory', dataset_name: 'other_tenant_dataset', score: 1 },
-      ]),
-    }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
-    const hits = await adapter.recall({
-      text: 'memory',
-      scopes: [project, session],
-      limit: 5,
+  it('refuses a same-named dataset owned by another Cognee user (quirk 2 guard)', async () => {
+    const fake = fakeCognee({ ownerId: '99999999-9999-4999-8999-999999999999' })
+    fake.datasets.push({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      name: scopeKey(project),
+      ownerId: '99999999-9999-4999-8999-999999999999',
     })
-    expect(hits).toHaveLength(2)
-    expect(hits[0]?.record).toMatchObject({ id: 'p1', scope: project })
-    expect(hits[1]?.record).toMatchObject({ id: 's1', scope: session })
-    expect(hits[1]?.score).toBe(1)
-    const body = JSON.parse(server.requests[0]?.body ?? '') as Record<string, unknown>
-    expect(body.datasets).toEqual([scopeKey(project), scopeKey(session)])
-    expect(body.search_type).toBe('GRAPH_COMPLETION')
-  })
-
-  it('only infers a scope when exactly one was requested and no dataset was returned', async () => {
-    server = await startMockServer(() => ({ body: JSON.stringify([{ id: '1', text: 'one', score: 0.5 }]) }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
-    await expect(adapter.recall({ text: 'one', scopes: [project], limit: 5 })).resolves.toHaveLength(1)
-    server.requests.length = 0
-    await expect(adapter.recall({ text: 'one', scopes: [project, session], limit: 5 })).resolves.toHaveLength(0)
-  })
-
-  it('supports the results envelope and ignores malformed rows', async () => {
-    server = await startMockServer(() => ({
-      body: JSON.stringify({
-        results: [
-          { id: '1', content: 'from content', dataset: scopeKey(project), similarity: '0.8' },
-          { id: '2', dataset: scopeKey(project) },
-        ],
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    await expect(
+      adapter.remember({
+        text: 'should not be written',
+        scope: project,
+        provenance: { kind: 'tool_call', source: 'test', recordedAt: '2026-01-01T00:00:00.000Z' },
       }),
-    }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
-    const hits = await adapter.recall({ text: 'content', scopes: [project], limit: 5 })
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(server.requests.some((request) => request.url === '/api/v1/remember')).toBe(false)
+  })
+
+  it('derives completion from status/memory + pipeline status, not from the 200', async () => {
+    const fake = fakeCognee({ memoryUntilReady: 3 })
+    server = await startMockServer(fake.handler)
+    let clock = 1_000
+    const adapter = new CogneeRestAdapter({
+      config: config(server.url, { ingestion: { timeoutMs: 10_000, pollMs: 500 } }),
+      env,
+      now: () => (clock += 10),
+      sleep: async () => {
+        clock += 500
+      },
+    })
+    const result = await adapter.remember({
+      text: 'pipeline-gated memory',
+      scope: project,
+      provenance: { kind: 'tool_call', source: 'test', recordedAt: '2026-01-01T00:00:00.000Z' },
+    })
+    expect(result.id).toMatch(/^3333/)
+    // staged, staged, staged, ready => 4 polls; a 200-only adapter would poll once.
+    expect(fake.memoryCalls).toBe(4)
+    const statusCalls = server.requests.filter((request) => request.url.startsWith('/api/v1/datasets/status?'))
+    expect(statusCalls.length).toBe(1)
+    expect(statusCalls[0]?.url).toContain('pipeline=cognify_pipeline')
+  })
+
+  it('fails the write when ingestion never becomes searchable', async () => {
+    const fake = fakeCognee({ memoryUntilReady: 1_000 })
+    server = await startMockServer(fake.handler)
+    let clock = 1_000
+    const adapter = new CogneeRestAdapter({
+      config: config(server.url, { ingestion: { timeoutMs: 1_000, pollMs: 100 } }),
+      env,
+      now: () => (clock += 120),
+      sleep: async () => {},
+    })
+    await expect(
+      adapter.remember({
+        text: 'never ready',
+        scope: project,
+        provenance: { kind: 'tool_call', source: 'test', recordedAt: '2026-01-01T00:00:00.000Z' },
+      }),
+    ).rejects.toMatchObject({ code: 'TIMEOUT' })
+  })
+
+  it('parses the verified /search group shape and drops foreign datasets', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const hits = await adapter.recall({ text: 'deploy target', scopes: [project, other], limit: 5 })
     expect(hits).toHaveLength(1)
-    expect(hits[0]?.record.text).toBe('from content')
-    expect(hits[0]?.score).toBe(0.8)
+    expect(hits[0]?.record).toMatchObject({
+      id: DATA_ID,
+      text: 'the deploy target is blue',
+      scope: project,
+      createdAt: new Date(1_795_307_390_969).toISOString(),
+      tags: ['ops'],
+    })
+    expect(hits[0]?.score).toBeCloseTo(0.87)
+    const search = server.requests.find((request) => request.url === '/api/v1/search')
+    expect(JSON.parse(search?.body ?? '{}')).toMatchObject({
+      query: 'deploy target',
+      searchType: 'CHUNKS',
+      datasetIds: [PROJECT_DATASET],
+      topK: 5,
+    })
   })
 
-  it('surfaces 404/405/501 for forget and never deletes a dataset', async () => {
-    for (const status of [404, 405, 501]) {
-      server = await startMockServer(() => ({ status }))
-      const adapter = new CogneeRestAdapter({ config: config(server.url) })
-      await expect(adapter.forget({ id: 'mem-1', scope: project })).rejects.toMatchObject({
-        code: 'UNSUPPORTED_OPERATION',
-        operation: 'forget',
-      })
-      expect(server.requests).toHaveLength(1)
-      expect(server.requests[0]?.method).toBe('DELETE')
-      expect(server.requests[0]?.url).toBe(COGNEE_PATHS.delete)
-      expect(server.requests.some((request) => request.url.includes('/datasets') && request.method === 'DELETE')).toBe(
-        false,
-      )
-      await server.close()
-      server = undefined
-    }
+  it('degrades recall quietly when the latency budget expires (open mode)', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(async (request) => {
+      const spec = (await fake.handler(request)) as { body?: string; status?: number }
+      return { ...spec, delayMs: 600 }
+    })
+    const adapter = new CogneeRestAdapter({
+      config: config(server.url, { recall: { searchType: 'GRAPH_COMPLETION', maxRecallLatencyMs: 150 } }),
+      env,
+    })
+    const hits = await adapter.recall({ text: 'deploy', scopes: [project], limit: 5 })
+    expect(hits).toEqual([])
   })
 
-  it('reports a successful per-memory forget', async () => {
-    server = await startMockServer(() => ({ body: JSON.stringify({ deleted: true }) }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
-    await expect(adapter.forget({ id: 'mem-1', scope: project })).resolves.toEqual({
-      id: 'mem-1',
+  it('surfaces the timeout when failure mode is closed', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(async (request) => {
+      const spec = (await fake.handler(request)) as { body?: string; status?: number }
+      return { ...spec, delayMs: 600 }
+    })
+    const adapter = new CogneeRestAdapter({
+      config: config(server.url, {
+        failureMode: 'closed',
+        recall: { searchType: 'GRAPH_COMPLETION', maxRecallLatencyMs: 150 },
+      }),
+      env,
+    })
+    await expect(adapter.recall({ text: 'deploy', scopes: [project], limit: 5 })).rejects.toMatchObject({
+      code: 'TIMEOUT',
+    })
+  })
+
+  it('forgets one data record by datasetId + dataId, never a dataset', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    await expect(adapter.forget({ id: DATA_ID, scope: project })).resolves.toEqual({
+      id: DATA_ID,
       scope: project,
       forgotten: true,
     })
-    expect(server.requests[0]?.url).toBe(COGNEE_PATHS.delete)
+    const forget = server.requests.find((request) => request.url === '/api/v1/forget')
+    expect(JSON.parse(forget?.body ?? '{}')).toEqual({ datasetId: PROJECT_DATASET, dataId: DATA_ID })
+    expect(server.requests.some((request) => request.method === 'DELETE')).toBe(false)
   })
 
-  it('reports status and health without leaking endpoint internals', async () => {
-    server = await startMockServer((request) => {
-      if (request.url === COGNEE_PATHS.datasets) return { body: JSON.stringify({ data: [{}, {}] }) }
-      if (request.url === COGNEE_PATHS.health) return { body: '{"status":"ok"}' }
-      return { status: 404 }
+  it('does not send a synthetic (non-UUID) id to the backend', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    await expect(adapter.forget({ id: 'graph-abc', scope: project })).resolves.toMatchObject({
+      forgotten: false,
     })
+    expect(server.requests.some((request) => request.url === '/api/v1/forget')).toBe(false)
+  })
+
+  it('reports status and health (origin-relative /health) without leaking the key', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(fake.handler)
     let now = 1_000
-    const adapter = createCogneeRestAdapter({ config: config(server.url), now: () => (now += 5) })
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env, now: () => (now += 5) })
     const status = await adapter.status()
     expect(status).toMatchObject({ transport: 'rest', reachable: true })
-    expect(status.details?.datasetCount).toBe(2)
+    expect(status.details?.datasetCount).toBe(1)
+    expect(JSON.stringify(status)).not.toContain('test-key')
     const health = await adapter.health()
-    expect(health).toMatchObject({ ok: true })
-    expect(health.latencyMs).toBeGreaterThanOrEqual(0)
+    expect(health).toMatchObject({ ok: true, message: 'cognee 1.6.10-local' })
+    expect(server.requests.some((request) => request.url === '/health')).toBe(true)
   })
 
   it('reports unreachable status instead of throwing', async () => {
     server = await startMockServer(() => ({ status: 500 }))
-    const adapter = new CogneeRestAdapter({ config: config(server.url) })
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
     const status = await adapter.status()
     expect(status).toMatchObject({ transport: 'rest', reachable: false })
     expect(status.details?.errorCode).toBe('BACKEND')

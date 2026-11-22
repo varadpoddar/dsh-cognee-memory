@@ -20,6 +20,7 @@ function mcpConfig(mcpUrl: string): CogneeMemoryConfig {
     transport: 'mcp-http',
     mcpUrl,
     apiBaseUrl: 'http://127.0.0.1:1',
+    authMode: 'none',
     requestTimeoutMs: 1_000,
     maxRetries: 0,
     retryBackoffMs: 0,
