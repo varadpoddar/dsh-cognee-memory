@@ -88,3 +88,43 @@ The settings file contains only URL/enable flags. `memory_status` and
 `/settings.json` report the credential as `set` / `unset` from the environment
 (`COGNEE_API_KEY` by default, `config.apiTokenEnv`) and never its value. Log lines
 name the new endpoint only.
+
+## Milestone 9 additions (2026-11-22)
+
+The same two routes now also carry runtime toggles and a read-only inspection
+snapshot. Authentication, status codes (`503` unset token, `401` missing/wrong
+token, `200` authorized, `415`/`413`/`405`), escaping, `no-store`, CSP, and hot
+retargeting of `apiBaseUrl` are unchanged.
+
+### Toggles
+
+`POST` accepts `autoRecall` and `autoWrite` next to `apiBaseUrl` / `mcpUrl` /
+`enabled`. They persist in the same JSON file (`stored > env > profile`) and
+apply without a restart:
+
+* `autoRecall` — gate for prefetch + prompt injection; explicit `memory_recall`
+  still works.
+* `autoWrite` — gate for new automatic extraction; already-accepted queue/outbox
+  work is still drained, so nothing acknowledged is lost.
+
+Env seeds: `COGNEE_MEMORY_AUTO_RECALL`, `COGNEE_MEMORY_AUTO_WRITE`.
+
+### Inspection (`inspect` hook)
+
+`registerSettingsRoutes` takes an optional `inspect?: () => Promise<SettingsInspection>`.
+The plugin wires it to `buildInspection` (`src/settings/inspect.ts`) with the
+coordinator, metrics, extraction/outbox, optional adapter inventory
+(`GET /datasets` + `GET /datasets/{id}/data`), and a bounded recall ledger.
+It runs under a 2.5 s deadline and degrades to a note on the page (still `200`);
+the hook is only called after authorization.
+
+The page and JSON add: auto-recall/auto-write toggles, principal + project + readable
+scopes, candidate queue counts and outbox operations, ingestion success/failure,
+first-turn recall hit rate, recall/prefetch latency p50/p95, context tokens
+(last/p95/total), memory count, dataset rows, and read-only per-memory rows with
+states `candidate · approved · queued · ingesting · indexed · recall-verified ·
+failed · superseded · deleted` (only evidenced states are populated).
+
+No delete/correct action exists on the page: item-level deletion, correction, and
+consolidation are deferred. Ingestion/recall counters are process-local; queue,
+memory, and state data are read from shared disk and the live backend.

@@ -142,3 +142,100 @@ session-derived agent scope and global-by-default behaviour were updated.
   `identity.principalId` per tenant.
 * Automatic retry of `failed` queue entries; they remain visible in
   `memory_status` for manual reconciliation.
+
+## Milestones 4, 5, 6, 9 — the reliability half (2026-11-22)
+
+Build `dsh-cognee-memory-0.1.0.tgz` sha256
+`d36af1b51a864376178967d3ff3c4647e4589b7f9d339e6e046fda425eea97f6`,
+installed into `/var/lib/deepseek-harness/.dsh/profiles/{web,headless}` on CT 103
+(pnpm 12.21.0, store v11); `deepseek-harness.service` restarted and `active`.
+The final small fix (first-turn hit metric) was re-packed as the same path and
+re-installed by removing each profile's `node_modules`/`pnpm-lock.yaml` first;
+the installed `lib/memory/retrieval.js` carries the new comment.
+
+| Check | Result |
+| --- | --- |
+| `tsc -p tsconfig.json --noEmit` | pass, 0 errors |
+| `tsc -p tsconfig.build.json` (`npm run build`) | pass |
+| `npx vitest run` | **40 files / 393 tests passed** |
+| `npx vitest run --config vitest.live.config.ts` | **4 files / 13 tests passed** (33.5 s; real Cognee) |
+| Service after install | `active`, journal free of `error|did not activate` for the plugin |
+
+### Milestone 6 — measured search-type comparison (read-only, existing fixtures)
+
+`test/live/search-type-compare.test.ts`, `topK=8`, 3 runs per strategy, dataset
+`dsh_cognee_project_project-4be96e7c2cdbb95a1ac9`:
+
+```
+SEARCH-TYPE COMPARISON 2026-11-22T05:11:51.323Z
+| strategy         | runs | median ms | p95 ms | items | amber rank | CT103 rank | fixture |
+| CHUNKS           |    3 |       165 |    939 |     3 |          1 |          1 | yes     |
+| GRAPH_COMPLETION |    3 |      4566 |   5072 |     0 |          - |          - | no      |
+| recall           |    3 |       382 |    443 |     1 |          1 |          1 | yes     |
+```
+
+A second full-suite run measured CHUNKS 158/173 ms, GRAPH_COMPLETION 6987/7988 ms
+(0 items, fixture absent), recall 373/384 ms. **CHUNKS ranks best for our data:
+fixture at rank 1, ~27x faster than GRAPH_COMPLETION, which returned nothing for
+this dataset.** The coordinator therefore keeps `recall.searchType: CHUNKS` as
+the default; the measurement is reproducible rather than assumed.
+
+### Milestone 4 + 5 — unit coverage
+
+| File | Cases | Focus |
+| --- | --- | --- |
+| `test/outbox.test.ts` | 14 | stable op id, cross-process idempotency, state machine, dataRef required for success, permanent authz never retried, transient backoff then success, maxAttempts exhaustion, lease-expiry recovery, fresh lease untouched, corrupt lines, secret refusal, 0600/0700, bounded secret-free view, candidate version keying |
+| `test/extraction-service.test.ts` | 10 (5 new) | outbox complete with Cognee dataRef, `autoWrite:false` drains accepted work, startup recovery of an expired `processing` lease, permanent failure recorded truthfully, transient retry |
+| `test/task-lifecycle.test.ts` | 22 | all six record kinds, completion vs failed/blocked, authority+evidence required, commit sha validation, idempotency per task+version+payload, version bump, per-task cap, disabled no-op, verified `subagent/end` + `workflow/agent-end` subscriptions, `lastAssistantMessage` never persisted, listener isolation |
+| `test/retrieval.test.ts` | 12 | stable layer reuse/refresh, strict 300+900 token cap, 8-item cap, superseded/revoked/expired filtering, budget expiry without throwing, stable-only failure, first-turn hit/miss, latency/context samples, ledger, source+confidence labels |
+| `test/inspector.test.ts` | 11 | toggles+sources, principal/scope inspection, queue/ingestion counts, hit-rate math, p50/p95, context tokens, inventory count/degradation, all nine memory states, recall-verified, no credential material |
+
+`test/prompt-context.test.ts`, `test/turn-prefetch.test.ts`, `test/agent-lifecycle.test.ts`,
+`test/settings-http.test.ts`, `test/settings-plugin.test.ts`, `test/plugin.test.ts`
+and `test/metrics.test.ts` were updated to the new M6 budget/presentation, the
+two new lifecycle listeners, the system-policy section, and the added settings
+fields; all their previous 401/401/200/503, escaping, and hot-retarget cases remain.
+
+### Milestone 9 — live inspection numbers (real run)
+
+Probe process (`node` in the installed `web` profile) wrote one fact through the
+outbox and recalled it in an isolated project scope, then built the same
+inspection the page serves:
+
+```
+outbox   pending 0 / processing 0 / complete 1 / failed 0
+dataRef  cognee:dsh-project-m4m6-probe-…-#b97bb9fc-74ee-4df5-af00-ad73ecd61339
+block    Known context (recalled memory; may be incomplete):
+         - [project · medium] the probe marker is probe-marker-… and the host is CT 103
+toggles  {autoRecall:true, autoWrite:true}
+scopes   principal 05a6c959-3357-4a6d-a52a-1ad79ab16d8e,
+         project dsh-project-m4m6-probe-…
+queue    {queued:0, ingested:1, failed:0, total:1}
+ingest   {succeeded:1, failed:0}
+hitRate  {attempts:1, hits:1, misses:0, hitRate:1}
+latency  recall {count:2, p50:188 ms, p95:196 ms}
+tokens   {last:48, p95:48, total:48}
+memory   {count:11, datasets:9, checkedAt:2026-11-22T05:16:14.258Z}
+states   {indexed:0, recall-verified:1, …}
+```
+
+The authenticated page in the running service (`settings.json`, token-protected)
+reported `memory.count: 11`, `datasets: 9`, queue `{ingested: 2}`, and an
+`indexed` memory row with its real preview; tokenless GET returned **401**.
+Its ingestion/recall panels are per-process and read 0 until that process itself
+writes/recalls — the probe numbers above are from a process that did.
+
+### End-to-end on CT 103 (headless, tools off, isolated scopes)
+
+| # | Check | Result |
+| --- | --- | --- |
+| 4 | tools-off write `Remember that the acceptance marker is verde-fox-1503 …` | candidate `mem-d88ac993…` → queue `ingested`; outbox op `complete` with dataRef; 0 tool events |
+| 5 | new process, same project scope, first response | `- **Acceptance marker:** verde-fox-1503 / - **Target host:** CT 103`, 0 tool events |
+| 6 | different project scope | "I don't have any information about an acceptance marker or a target host…" |
+
+### Deferred in this pass (explicitly not run)
+
+* Item-level deletion/correction and consolidation (`DELETE /datasets/{id}/data/{id}`).
+* `kill -9` crash injection on the real service. Recovery is covered by unit
+  tests over a second outbox instance and an expired lease; not by killing the service.
+* Browser UI walk-through; all harness runs were headless/one-shot.

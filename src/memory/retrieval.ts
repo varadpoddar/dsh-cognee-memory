@@ -230,7 +230,9 @@ export class RetrievalCoordinator {
       this.metrics?.increment('memory.context.consumed', block.tokens)
     }
     if (request.turn === 1) {
-      this.metrics?.increment(specific.hits.length > 0 ? 'recall.firstTurnHits' : 'recall.firstTurnMisses')
+      // Hit rate is about the turn's injected block, not one layer: the stable
+      // principal/project layer legitimately answers some first turns alone.
+      this.metrics?.increment(selected.length > 0 ? 'recall.firstTurnHits' : 'recall.firstTurnMisses')
     }
 
     return {
