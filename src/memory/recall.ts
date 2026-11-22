@@ -25,6 +25,21 @@ export interface RecallRequest {
 
 export interface RecallServiceOptions {
   readonly cwd?: string
+  /**
+   * Optional provenance index. Every recall that survives the scope policy
+   * records what surfaced each memory, so the setting page and the detail route
+   * can explain it. Both recall paths (tools and prompt prefetch) go through
+   * this service, which is why the hook lives here.
+   */
+  readonly provenanceIndex?: {
+    recordRecall(
+      hits: readonly RecallHit[],
+      context: {
+        readonly identity?: CallerIdentity
+        readonly searchType?: string
+      },
+    ): void
+  }
 }
 
 function clampScore(score: number): number {
@@ -52,6 +67,7 @@ export class RecallService {
   private readonly cwd: string | undefined
   private readonly identityResolver: IdentityResolver | undefined
   private readonly ephemeral: EphemeralSessionMemory | undefined
+  private readonly provenanceIndex: RecallServiceOptions['provenanceIndex']
 
   constructor(dependencies: RecallDependencies, options: RecallServiceOptions = {}) {
     this.adapter = dependencies.adapter
@@ -60,6 +76,7 @@ export class RecallService {
     this.cwd = options.cwd
     this.identityResolver = dependencies.identityResolver
     this.ephemeral = dependencies.ephemeral
+    this.provenanceIndex = options.provenanceIndex
   }
 
   async policyFor(identity: CallerIdentity): Promise<AccessPolicy> {
@@ -117,6 +134,17 @@ export class RecallService {
           return Date.parse(b.record.createdAt) - Date.parse(a.record.createdAt)
         })
         .slice(0, limit)
+      if (this.provenanceIndex !== undefined && filtered.length > 0) {
+        try {
+          this.provenanceIndex.recordRecall(filtered, {
+            identity,
+            searchType: this.config.recall.searchType,
+          })
+        } catch {
+          // Evidence for humans never fails a recall.
+          this.metrics?.increment('provenance.record.failures')
+        }
+      }
       return filtered
     } catch (error) {
       this.metrics?.increment('recall.failures')

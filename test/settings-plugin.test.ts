@@ -84,7 +84,7 @@ describe('plugin wiring for the runtime settings page', () => {
     // through ctx.webServer.register.
     expect([...routes.keys()].sort()).toEqual([
       '/plugins/cognee-memory/memories.json',
-      '/plugins/cognee-memory/memory/',
+      '/plugins/cognee-memory/memory',
       '/plugins/cognee-memory/settings',
       '/plugins/cognee-memory/settings.json',
     ])

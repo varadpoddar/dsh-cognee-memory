@@ -107,6 +107,11 @@ export function isAddressableMemoryId(value: unknown): value is string {
   return typeof value === 'string' && ID_PATTERN.test(value) && value !== '.' && value !== '..'
 }
 
+function metadataString(record: RecallHit['record'], key: string): string | undefined {
+  const value = record.metadata?.[key]
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
 function boundedExcerpt(text: string): string {
   const sanitized = sanitizeMemoryText(text).replace(/\s*\n+\s*/g, ' ').trim()
   const redacted = redactSecrets(sanitized).text
@@ -219,8 +224,11 @@ export class ProvenanceIndex {
       if (!isAddressableMemoryId(id)) continue
       if (hit.record.scope.scope === 'session') continue
       const existing = this.entries.get(id)
-      const datasetName = scopeKey(hit.record.scope)
-      const datasetId = context.datasetIds?.[datasetName]
+      const metaDatasetName = metadataString(hit.record, 'datasetName')
+      const metaDatasetId = metadataString(hit.record, 'datasetId')
+      const datasetName = metaDatasetName ?? scopeKey(hit.record.scope)
+      const datasetId =
+        metaDatasetId ?? context.datasetIds?.[datasetName] ?? context.datasetIds?.[scopeKey(hit.record.scope)]
       const documentId = context.documentIds?.[id]
       const next: ProvenanceEntry = {
         id,
@@ -321,6 +329,26 @@ export class ProvenanceIndex {
     }
     this.entries.set(input.id, Object.freeze(entry))
     this.evict()
+    this.persist()
+  }
+
+  /**
+   * Attach the backend dataset UUID once an inventory resolves the dataset
+   * name (Cognee assigns UUIDs, the local scope map only knows names).
+   */
+  setDatasetId(memoryId: string, datasetId: string): void {
+    this.ensureLoaded()
+    if (!isAddressableMemoryId(memoryId) || datasetId.trim() === '') return
+    const existing = this.entries.get(memoryId)
+    if (existing === undefined || existing.dataset.id === datasetId) return
+    this.entries.set(
+      memoryId,
+      Object.freeze({
+        ...existing,
+        dataset: { name: existing.dataset.name, id: datasetId.trim() },
+        updatedAt: this.now().toISOString(),
+      }),
+    )
     this.persist()
   }
 

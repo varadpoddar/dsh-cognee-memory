@@ -28,9 +28,22 @@ function recallService(recall: MemoryAdapter['recall'], overrides: Record<string
     },
   }
   const metrics = new Metrics()
+  const provenance = {
+    calls: [] as Array<{ ids: string[]; searchType: string | undefined }>,
+    recordRecall(
+      hits: readonly RecallHit[],
+      context: { readonly identity?: { readonly principalId?: string }; readonly searchType?: string },
+    ) {
+      this.calls.push({ ids: hits.map((hit) => hit.record.id), searchType: context.searchType })
+    },
+  }
   return {
     metrics,
-    service: new RecallService({ adapter, config: parseConfig({ ...config, ...overrides }), metrics }, { cwd: PROJECT_ID }),
+    provenance,
+    service: new RecallService(
+      { adapter, config: parseConfig({ ...config, ...overrides }), metrics },
+      { cwd: PROJECT_ID, provenanceIndex: provenance },
+    ),
   }
 }
 
@@ -122,5 +135,41 @@ describe('RecallService', () => {
     const { service } = recallService(hits(record('1', 'mine', SESSION_SCOPE), record('2', 'other', foreign)))
     const result = await service.recall({ text: 'q', identity: identity() })
     expect(result).toHaveLength(1)
+  })
+})
+
+describe('recall provenance', () => {
+  it('records only the hits that survive the scope policy, with the configured search type', async () => {
+    const { service, provenance } = recallService(
+      hits(record('1', 'mine'), record('2', 'foreign', foreign)),
+      { recall: { searchType: 'GRAPH_COMPLETION' } },
+    )
+    await service.recall({ text: 'anything', identity: identity(), limit: 5 })
+    expect(provenance.calls).toHaveLength(1)
+    expect(provenance.calls[0]?.ids).toEqual(['1'])
+    expect(provenance.calls[0]?.searchType).toBe('GRAPH_COMPLETION')
+  })
+
+  it('never records when the backend returned nothing readable', async () => {
+    const { service, provenance } = recallService(hits(record('2', 'foreign', foreign)))
+    await service.recall({ text: 'anything', identity: identity(), limit: 5 })
+    expect(provenance.calls).toHaveLength(0)
+  })
+
+  it('does not let an index failure break a recall', async () => {
+    const { service } = recallService(hits(record('1', 'mine')))
+    const failing = new RecallService(
+      { adapter: { ...({} as MemoryAdapter), recall: hits(record('1', 'mine')) }, config, metrics: new Metrics() },
+      {
+        cwd: PROJECT_ID,
+        provenanceIndex: {
+          recordRecall() {
+            throw new Error('disk full')
+          },
+        },
+      },
+    )
+    await expect(failing.recall({ text: 'anything', identity: identity(), limit: 5 })).resolves.toHaveLength(1)
+    await expect(service.recall({ text: 'anything', identity: identity(), limit: 5 })).resolves.toHaveLength(1)
   })
 })

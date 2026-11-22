@@ -273,6 +273,16 @@ export function parseSearchResponse(
     const byId = group.datasetId === undefined ? undefined : scopeByDatasetId?.get(group.datasetId)
     const scope = byId ?? matchScope(group.datasetName, scopes)
     if (scope === undefined) continue
+    // The backend names and UUID-identifies the dataset each group came from.
+    // Carry it on the record so the provenance view can address the exact
+    // dataset (the local scope map only derives a name).
+    const datasetMetadata =
+      group.datasetId === undefined && group.datasetName === undefined
+        ? undefined
+        : {
+            ...(group.datasetId === undefined ? {} : { datasetId: group.datasetId }),
+            ...(group.datasetName === undefined ? {} : { datasetName: group.datasetName }),
+          }
     group.rows.forEach((row, index) => {
       if (hits.length >= maxRows) return
       if (typeof row === 'string') {
@@ -283,6 +293,7 @@ export function parseSearchResponse(
             text: row,
             scope,
             createdAt: nowIso,
+            ...(datasetMetadata === undefined ? {} : { metadata: datasetMetadata }),
           },
           score: Math.max(0.05, 1 - index * 0.05),
         })
@@ -311,6 +322,14 @@ export function parseSearchResponse(
           scope,
           createdAt: createdAtOf(row.created_at ?? row.createdAt, nowIso),
           ...(tags === undefined || tags.length === 0 ? {} : { tags }),
+          ...(datasetMetadata === undefined
+            ? {}
+            : {
+                metadata: {
+                  ...datasetMetadata,
+                  ...(tags === undefined || tags.length === 0 ? {} : { tags }),
+                },
+              }),
         },
         score: scoreOf(pickNumber(row, SCORE_KEYS)),
       })

@@ -131,7 +131,10 @@ export function apply(
   const adapter = createMemoryAdapter({ config, metrics, env: process.env, endpoint })
   // Bounded, metadata-only provenance for the authenticated detail view. It
   // never holds a credential; a failure to read or write it never fails recall.
-  const provenance = new ProvenanceIndex({ filePath: resolveProvenancePath(process.env) })
+  const provenance = new ProvenanceIndex({
+    filePath: resolveProvenancePath(process.env),
+    logger: (message) => process.stderr.write(`dsh-cognee-memory: ${message}\n`),
+  })
   const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint, provenanceIndex: provenance })
   // Bounded, read-only record of ids a recall actually returned; feeds the
   // settings page's `recall-verified` state.
@@ -216,6 +219,18 @@ export function apply(
       index: provenance,
       store: settings,
       access: provenanceAccess,
+      ...(adapter.inventory === undefined && adapter.lookupDataset === undefined
+        ? {}
+        : {
+            resolveDatasetId: async (datasetName: string): Promise<string | undefined> => {
+              if (adapter.lookupDataset !== undefined) {
+                const found = await adapter.lookupDataset(datasetName)
+                if (found !== undefined) return found.id
+              }
+              const inventory = await adapter.inventory?.()
+              return inventory?.datasets.find((dataset) => dataset.name === datasetName)?.id
+            },
+          }),
     })) {
       disposers.push(disposeRoutes)
     }

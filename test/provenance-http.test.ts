@@ -73,6 +73,7 @@ interface HarnessOptions {
   readonly accessThrows?: boolean
   readonly datasetId?: string
   readonly cogneeUiBaseUrl?: string
+  readonly resolveDatasetId?: (datasetName: string) => Promise<string | undefined>
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -115,6 +116,9 @@ function harness(options: HarnessOptions = {}) {
       return access
     },
     ...(options.cogneeUiBaseUrl === undefined ? {} : { cogneeUiBaseUrl: options.cogneeUiBaseUrl }),
+    ...(options.resolveDatasetId === undefined
+      ? {}
+      : { resolveDatasetId: options.resolveDatasetId, resolutionTimeoutMs: 100 }),
   })
   return {
     index,
@@ -136,7 +140,18 @@ function harness(options: HarnessOptions = {}) {
 }
 
 const authorized = { authorization: `Bearer ${TOKEN}` }
+const memoryPath = (id: string): string => `${PROVENANCE_PATH_PREFIX}${encodeURIComponent(id)}`
 const env = { COGNEE_MEMORY_SETTINGS_TOKEN: TOKEN, COGNEE_API_KEY: SECRET }
+
+describe('provenance route shape', () => {
+  it('registers a route path with no trailing slash, matching p and p/<id>', () => {
+    const h = harness({ env })
+    const prefix = h.routes.find((route) => route.kind === 'prefix')
+    expect(prefix?.path).toBe('/plugins/cognee-memory/memory')
+    expect(prefix?.path.endsWith('/')).toBe(false)
+    expect(PROVENANCE_PATH_PREFIX.endsWith('/')).toBe(true)
+  })
+})
 
 describe('provenance JSON route', () => {
   it('serves provenance for an authorized memory id', async () => {
@@ -162,6 +177,34 @@ describe('provenance JSON route', () => {
     expect(body.excerpt).toContain('amber-otter-7731')
     expect(response.body).not.toContain(TOKEN)
     expect(response.body).not.toContain(SECRET)
+  })
+
+  it('resolves the dataset UUID lazily and persists it', async () => {
+    const h = harness({
+      env,
+      resolveDatasetId: async (name) =>
+        name === 'dsh-project-demo-project' ? 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' : undefined,
+    })
+    const response = await h.request(`${PROVENANCE_PATH_PREFIX}mem-1`, 'GET', authorized)
+    expect(response.status).toBe(200)
+    expect((JSON.parse(response.body) as { dataset: { id: string } }).dataset.id).toBe(
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    )
+    expect(h.index.get('mem-1', { principalId: 'operator', readableScopes: [PROJECT] })?.dataset.id).toBe(
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    )
+  })
+
+  it('degrades to the UI origin when dataset resolution fails or times out', async () => {
+    const h = harness({
+      env,
+      resolveDatasetId: async () => {
+        throw new Error('inventory unavailable')
+      },
+    })
+    const response = await h.request(`${PROVENANCE_PATH_PREFIX}mem-1`, 'GET', authorized)
+    expect(response.status).toBe(200)
+    expect((JSON.parse(response.body) as { deepLink: string }).deepLink).toBe(DEFAULT_COGNEE_UI_BASE_URL)
   })
 
   it('falls back to the Cognee UI origin when the dataset UUID is unknown', async () => {

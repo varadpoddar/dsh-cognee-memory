@@ -134,7 +134,14 @@ export class MemoryCoordinator {
         identityResolver: this.identityResolver,
         ephemeral: this.ephemeral,
       },
-      { ...(this.cwd === undefined ? {} : { cwd: this.cwd }) },
+      {
+        ...(this.cwd === undefined ? {} : { cwd: this.cwd }),
+        // Both recall paths (tools and prompt prefetch) go through this service,
+        // so this is where "what surfaced this memory" is recorded.
+        ...(this.provenanceIndex === undefined
+          ? {}
+          : { provenanceIndex: this.provenanceIndex }),
+      },
     )
   }
 
@@ -287,20 +294,7 @@ export class MemoryCoordinator {
   }
 
   async recall(request: RecallRequest): Promise<RecallHit[]> {
-    const hits = await this.recallService.recall(request)
-    if (this.provenanceIndex !== undefined && hits.length > 0) {
-      try {
-        const identity = await this.identityResolver.resolve(request.identity)
-        this.provenanceIndex.recordRecall(hits, {
-          identity,
-          searchType: this.config.recall.searchType,
-        })
-      } catch {
-        // Provenance is evidence for humans; a failure must never fail a recall.
-        this.metrics?.increment('provenance.record.failures')
-      }
-    }
-    return hits
+    return this.recallService.recall(request)
   }
 
   /**

@@ -150,3 +150,30 @@ Notes that constrain the implementation:
 The panel is a client of that route: it asks the operator for the settings token, holds
 it in component memory only (never storage, never the URL it renders), and links to the
 server-rendered page for a full detail view.
+
+---
+
+## Live verification (0.2.0, CT 103 / DSH 0.2.1-rc.5, 2026-11-22)
+
+Installed artifact `dsh-cognee-memory-0.2.0.tgz`, sha256
+`39f598baa4f3895a15b9803993d050c882d7ba66a44bd53fab02a1da8822fd5f`, installed into the
+service `web` and `headless` profiles and mounted by restarting
+`deepseek-harness.service`. (This documentation update repacks the tarball; the code is
+byte-identical — only `docs/` changed — so the measured results are unchanged.)
+
+| Check | Result |
+| --- | --- |
+| `GET /plugins/cognee-memory/settings` no token / wrong token / right token | **401 / 401 / 200** |
+| `GET /plugins/cognee-memory/settings.json` Bearer | **200** |
+| `GET /plugins/cognee-memory/memories.json` no token / Bearer | **401 / 200**, real ids + `label · scope · date` rows |
+| `GET /plugins/cognee-memory/memory/<real id>` Bearer | **200**, dataset name + UUID `3d8d8ad8-41be-59c3-9310-7915c783e5ef`, ingest `indexed`, search type `CHUNKS`, confidence, excerpt |
+| deep link | `http://10.20.10.15:3000/datasets/3d8d8ad8-41be-59c3-9310-7915c783e5ef` |
+| same route `?format=html` | **200**, `cache-control: no-store`, `content-security-policy: default-src 'none'`, **0** `<script` occurrences |
+| unauthorized id (foreign principal) and unknown id, with a valid token | **404 / 404** (identical generic body) |
+| client bundle in the real boot graph | `"url":"plugins/??dsh-cognee-memory/client.js&rev=285004e20f7c"` in `window.__DSH_BOOT__`; fetching it returns **200** and contains `sidebarRightTabs`, `sidebar.right.pane.tab`, and the panel note |
+| tools-off conversation, first response | model echoed the injected block verbatim: `Known context:` + three `label · scope · date` lines; answer contained the fixture facts with zero tool calls |
+| 503 (token unset) | covered in-process by the unit suite, not by a live restart |
+
+Measured client bundle: `lib/client.js` 13,402 bytes, served batch 13,476 bytes. The panel's
+list/lookup calls were not exercised in a browser from this session; only the served bundle
+and the HTTP routes it calls were verified.

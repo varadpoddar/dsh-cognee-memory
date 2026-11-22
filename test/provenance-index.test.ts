@@ -139,6 +139,21 @@ describe('provenance index', () => {
     expect(entry?.createdAt).toBe('2026-01-03T00:00:00.000Z')
   })
 
+  it('attaches a backend dataset UUID once an inventory resolves it', () => {
+    const path = file()
+    const store = new ProvenanceIndex({ filePath: path })
+    store.recordRecall([hit('mem-1', 'alpha')], { identity: { principalId: 'operator' } })
+    store.setDatasetId('mem-1', '11111111-2222-3333-4444-555555555555')
+    const access = { principalId: 'operator', readableScopes: [PROJECT] }
+    expect(store.get('mem-1', access)?.dataset).toEqual({
+      name: 'dsh-project-demo-project',
+      id: '11111111-2222-3333-4444-555555555555',
+    })
+    expect(new ProvenanceIndex({ filePath: path }).get('mem-1', access)?.dataset.id).toBe(
+      '11111111-2222-3333-4444-555555555555',
+    )
+  })
+
   it('starts empty and keeps working when the file is unreadable', () => {
     const path = file()
     writeFileSync(path, '{ not json', 'utf8')

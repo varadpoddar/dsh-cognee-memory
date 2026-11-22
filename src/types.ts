@@ -142,6 +142,12 @@ export interface MemoryAdapter {
   probePrincipal?(): Promise<string | undefined>
   /** Read-only dataset/record inventory for the settings page. */
   inventory?(signal?: AbortSignal): Promise<MemoryInventory>
+  /**
+   * Resolve one dataset by exact name. The detail view needs the backend UUID,
+   * which only the backend assigns; `inventory` pages its answer, so this is a
+   * separate, unbounded lookup.
+   */
+  lookupDataset?(name: string, signal?: AbortSignal): Promise<{ id: string; name: string } | undefined>
 }
 
 /** Caller identity available at a tool call or hook boundary. */

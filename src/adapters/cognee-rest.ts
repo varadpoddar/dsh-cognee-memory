@@ -272,6 +272,23 @@ export class CogneeRestAdapter implements MemoryAdapter {
     }
   }
 
+  /** Exact-name dataset lookup for the provenance detail view (UUID is backend-assigned). */
+  async lookupDataset(
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<{ id: string; name: string } | undefined> {
+    const wanted = name.trim()
+    if (wanted === '') return undefined
+    const response = await this.client.requestJson<unknown>({
+      method: 'GET',
+      path: COGNEE_PATHS.datasets,
+      operation: 'datasets.lookup',
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const found = parseDatasetList(response).find((dataset) => dataset.name === wanted)
+    return found === undefined ? undefined : { id: found.id, name: found.name }
+  }
+
   async status(signal?: AbortSignal): Promise<AdapterStatus> {
     const checkedAt = new Date(this.now()).toISOString()
     try {

@@ -39,6 +39,8 @@ import type { WebServerLike } from '../types.js'
 /** Path prefix of one memory's detail view (declared by the settings page). */
 export { MEMORY_DETAIL_PATH_PREFIX as PROVENANCE_PATH_PREFIX } from './http.js'
 import { MEMORY_DETAIL_PATH_PREFIX } from './http.js'
+/** Route prefix: DSH route paths carry no trailing slash (`WebRoute.path`). */
+const PROVENANCE_ROUTE_PREFIX = MEMORY_DETAIL_PATH_PREFIX.replace(/\/+$/, '')
 const PROVENANCE_PATH_PREFIX = MEMORY_DETAIL_PATH_PREFIX
 /** Path of the bounded list the side panel reads. */
 export const MEMORIES_JSON_PATH = '/plugins/cognee-memory/memories.json'
@@ -55,6 +57,13 @@ export interface ProvenanceRoutesOptions {
   readonly env?: NodeJS.ProcessEnv
   /** Resolve the operator's principal and readable scopes; recall's own policy. */
   readonly access: () => Promise<ProvenanceAccess>
+  /**
+   * Optional lazy dataset-UUID lookup (Cognee assigns UUIDs; local scope names
+   * are derived). Called only for an already-authorized memory whose UUID is
+   * unknown, bounded by `resolutionTimeoutMs`, and its result is persisted.
+   */
+  readonly resolveDatasetId?: (datasetName: string) => Promise<string | undefined>
+  readonly resolutionTimeoutMs?: number
   readonly cogneeUiBaseUrl?: string
 }
 
@@ -245,6 +254,24 @@ function respondNotFound(res: ServerResponse, html: boolean): void {
   sendJson(res, 404, { error: 'not found' })
 }
 
+/** Bound one optional lookup; the detail view never waits past this. */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('dataset resolution timed out')), ms)
+    ;(timer as { unref?: () => void }).unref?.()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
+}
+
 function methodAllowed(req: IncomingMessage): boolean {
   const method = (req.method ?? 'GET').toUpperCase()
   return method === 'GET' || method === 'HEAD'
@@ -265,7 +292,9 @@ export function registerProvenanceRoutes(
   disposers.push(
     webServer.register({
       kind: 'prefix',
-      path: PROVENANCE_PATH_PREFIX,
+      // DSH matches `p` and `p/<anything>`; a trailing slash in `path` matches
+      // neither (`dsh-host-webserver/lib/index.js:500`).
+      path: PROVENANCE_ROUTE_PREFIX,
       handler: (req, res) => {
         void (async () => {
           const url = new URL(req.url ?? '/', 'http://localhost')
@@ -281,9 +310,9 @@ export function registerProvenanceRoutes(
             return
           }
           let rawId = ''
-          if (url.pathname.startsWith(PROVENANCE_PATH_PREFIX)) {
+          if (url.pathname.startsWith(`${PROVENANCE_ROUTE_PREFIX}/`)) {
             try {
-              rawId = decodeURIComponent(url.pathname.slice(PROVENANCE_PATH_PREFIX.length))
+              rawId = decodeURIComponent(url.pathname.slice(PROVENANCE_ROUTE_PREFIX.length + 1))
             } catch {
               rawId = ''
             }
@@ -300,10 +329,24 @@ export function registerProvenanceRoutes(
             respondNotFound(res, html)
             return
           }
-          const entry = options.index.get(rawId, access)
+          let entry = options.index.get(rawId, access)
           if (entry === undefined) {
             respondNotFound(res, html)
             return
+          }
+          if (entry.dataset.id === undefined && options.resolveDatasetId !== undefined) {
+            try {
+              const datasetId = await withDeadline(
+                options.resolveDatasetId(entry.dataset.name),
+                options.resolutionTimeoutMs ?? 2_500,
+              )
+              if (datasetId !== undefined && datasetId.trim() !== '') {
+                options.index.setDatasetId(entry.id, datasetId)
+                entry = options.index.get(rawId, access) ?? entry
+              }
+            } catch {
+              // An unresolved UUID is a missing field, never a failed detail view.
+            }
           }
           const view = provenanceView(entry, baseUrl)
           if (html) {

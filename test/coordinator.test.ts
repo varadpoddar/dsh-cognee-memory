@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { MemoryError } from '../src/errors.js'
 import { provenanceFromTool } from '../src/memory/provenance.js'
 import { makeScopeRef } from '../src/memory/scopes.js'
+import { MemoryCoordinator } from '../src/memory/coordinator.js'
+import { parseConfig } from '../src/config/schema.js'
 import {
   FIXED_NOW,
   PROJECT_ID,
@@ -188,5 +190,27 @@ describe('MemoryCoordinator.forget/status/health', () => {
 describe('scope constants', () => {
   it('keeps the project scope stable across harness instances', () => {
     expect(makeScopeRef('project', PROJECT_ID)).toEqual(PROJECT_SCOPE)
+  })
+})
+
+describe('MemoryCoordinator provenance wiring', () => {
+  it('records recall provenance through the recall service it owns', async () => {
+    const harness = createHarness()
+    const recorded: string[][] = []
+    const coordinator = new MemoryCoordinator({
+      adapter: harness.adapter,
+      config: parseConfig({ scopeDefaults: { projectId: PROJECT_ID } }),
+      provenanceIndex: {
+        recordRecall(hits) {
+          recorded.push(hits.map((hit) => hit.record.id))
+        },
+        recordWrite() {},
+        markSuperseded() {},
+      },
+    })
+    const adapterRecall = vi.spyOn(harness.adapter, 'recall').mockResolvedValue([record('mem-9', 'alpha')])
+    await coordinator.recall({ text: 'alpha', identity: identity(), limit: 5 })
+    expect(adapterRecall).toHaveBeenCalled()
+    expect(recorded).toEqual([['mem-9']])
   })
 })

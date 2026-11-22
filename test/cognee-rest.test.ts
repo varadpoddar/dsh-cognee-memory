@@ -270,6 +270,7 @@ describe('CogneeRestAdapter (verified live contract)', () => {
       scope: project,
       createdAt: new Date(1_795_307_390_969).toISOString(),
       tags: ['ops'],
+      metadata: { datasetId: PROJECT_DATASET, datasetName: scopeKey(project), tags: ['ops'] },
     })
     expect(hits[0]?.score).toBeCloseTo(0.87)
     const search = server.requests.find((request) => request.url === '/api/v1/search')
@@ -357,6 +358,22 @@ describe('CogneeRestAdapter (verified live contract)', () => {
     expect(inventory.checkedAt).toMatch(/Z$/)
     expect(JSON.stringify(inventory)).not.toContain('test-key')
     expect(JSON.stringify(inventory)).not.toContain('the deploy target is blue')
+  })
+
+  it('resolves a dataset UUID by exact name beyond the inventory page', async () => {
+    const fake = fakeCognee()
+    for (let index = 0; index < 12; index += 1) {
+      fake.datasets.push({ id: `0000000${index}-0000-4000-8000-00000000000${index}`, name: `dsh-project-filler-${index}`, ownerId: USER_ID })
+    }
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    await expect(adapter.lookupDataset(scopeKey(project))).resolves.toEqual({
+      id: PROJECT_DATASET,
+      name: scopeKey(project),
+    })
+    await expect(adapter.lookupDataset('no-such-dataset')).resolves.toBeUndefined()
+    await expect(adapter.lookupDataset('  ')).resolves.toBeUndefined()
   })
 
   it('reports status and health (origin-relative /health) without leaking the key', async () => {
