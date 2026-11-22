@@ -50,11 +50,14 @@ had just stored:
 ## Test plan / verification
 
 - `npm ci && npm run build && npm test` from a clean checkout of the repository:
-  **45 files / 455 tests passed**.
+  **45 files / 454 tests passed**.
 - `npm pack` → install `dsh-cognee-memory-1.0.0.tgz` into a clean throwaway
-  `DSH_HOME` on CT 103 (`/var/lib/deepseek-harness/.dsh-smoke`): plugin mounts,
-  all four tools register, the settings page answers `200` with the operator
-  token, and a tools-disabled first response recalls the maintenance fixture.
+  `DSH_HOME` on CT 103 (`/var/lib/deepseek-harness/.dsh-smoke`, removed after):
+  `--dump-config` composes the plugin row from the tarball, `memory_status`
+  executes against the live Cognee (`reachable: true`), the settings page
+  answers `200` with the operator token and `401` with a wrong token, and a
+  tools-disabled first response returns `m12-rank-window-0300-0400` with no
+  tool calls.
 - Live scenario D (prefetch-only, all tools disabled, fresh process, real
   Cognee):
   - **before** (0.2.1): `final: Not defined — no maintenance window is specified

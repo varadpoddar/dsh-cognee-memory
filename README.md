@@ -200,7 +200,7 @@ UI     settings page · provenance JSON/HTML · right-sidebar provenance panel
 ```bash
 npm ci
 npm run build        # strict tsc + client bundle
-npm test             # vitest: 45 files / 455 tests
+npm test             # vitest: 45 files / 454 tests
 npm run typecheck
 npm run test:live    # real backend, skipped without COGNEE_API_KEY
 ```

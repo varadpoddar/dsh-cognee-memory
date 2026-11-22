@@ -61,10 +61,13 @@ session events, and `ctx.webServer.register`.
 ### Verification
 
 - `npm ci && npm run build && npm test` from a clean checkout of the packed
-  tarball: **45 test files, 455 tests passed**.
-- CT 103 smoke: tarball installed into a clean `DSH_HOME`, plugin mounted, all
-  four memory tools registered, settings page `200` with the operator token,
-  and a tools-disabled first response recalled the maintenance fixture.
+  tarball: **45 test files, 454 tests passed**.
+- CT 103 smoke (clean `DSH_HOME=/var/lib/deepseek-harness/.dsh-smoke`, removed
+  after): tarball installed, `--dump-config` composed the `cognee-memory` row
+  from the tarball, `memory_status` executed against the live Cognee
+  (`reachable: true`), the settings page answered `200` with the operator token
+  and `401` with a wrong token, and a tools-disabled first response returned
+  `m12-rank-window-0300-0400` with no tool calls.
 
 ## 0.2.1 — 2026-11-22
 
