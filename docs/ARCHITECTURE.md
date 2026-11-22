@@ -147,19 +147,36 @@ budget, no context is emitted.
 
 ## 4. Retrieval, write-back, and lifecycle
 
-### 4.1 Prompt context (one-step freshness, never fails the turn)
+### 4.1 Prompt context (first-turn freshness, never fails the turn)
 
 `ctx.systemPrompt.context()` is synchronous, while retrieval is asynchronous.
-`MemoryPromptContext` therefore keeps a bounded cached block. The
-`agent/pre-step` waterfall starts a **fire-and-forget** refresh from the last
-user message and immediately delegates with `next()`. The refreshed block is
-visible from the next step; a failed refresh leaves the previous block or empty
-text and increments a metric. This uses only the verified waterfall hook and
-never mutates session state or rejects a step.
+`MemoryPromptContext` therefore keeps a bounded cached block, and two loop seams
+fill it:
 
-Registration is **per agent**: `agent/created` registers the prompt context in
-`agent.ctx`, so one session's memory cannot leak into another session's prompt.
-The registration is disposed on `agent/disposed` (and by the agent scope).
+1. **`agent/inbox/claimed`** — `inbox.claim()` in
+   `dsh-agent-loop/lib/index.js:906` emits this *before* `systemPrompt.assemble()`
+   runs at `:907`. The listener turns the claimed user message into a bounded
+   prefetch (300 tokens, 8 items, 900-char query, 1500 ms, one retry).
+2. **`system-prompt/assemble`** — an async expert waterfall
+   (`dsh-system-prompt` types, `@mode waterfall`) awaited by the loop before it
+   builds the request. It awaits the in-flight prefetch for at most the
+   remaining budget and substitutes this plugin's context entry with the fresh
+   block (`applyMemoryContext`). `refreshContext` at `:1053` re-resolves the
+   registered provider, which now returns the same cached text.
+
+Ordering is the whole point: `agent/pre-step` runs *after* assembly (`:909`), so
+a refresh started there can only reach the next step, and a one-shot turn never
+got turn-1 memory. The claim event fires early enough and the assembly waterfall
+is awaited, so the **first** model request already carries the block. Nothing is
+patched in DSH core and no timer hides the race. The prefetch is keyed by
+(agent scope, session, turn, query): a new turn, a changed scope fingerprint, a
+disposed agent, or an aborted assembly invalidates it and yields empty text.
+
+Registration of the synchronous provider stays **per agent** in `agent.ctx`
+(`agent/created`), so one session's memory cannot leak into another session's
+prompt; the waterfall skips agents with no binding. A failed, timed-out, or
+empty recall degrades to no injection plus a metric — never to a failed
+assembly or a stalled turn.
 
 ### 4.2 Write-back
 

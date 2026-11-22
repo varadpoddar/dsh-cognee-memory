@@ -535,3 +535,104 @@ does not exist). Existing datasets `dsh/agent/smoke` and
 End-to-end "say a fact in one conversation, ask in the next one-shot conversation" does
 **not** work. The blockers are structural, not configuration: the missing write hook, and
 the fire-and-forget pre-step refresh that cannot affect the current step's prompt.
+
+## 8. Milestone 1 — first-turn retrieval on the real harness (2026-11-21 20:14–20:20 PST)
+
+Build `83a92d1254ccde91e18fb3ca1be9afbbee7fd730a85f306525d44788dde469e1`
+(sha256 of `dsh-cognee-memory-0.1.0.tgz`), installed into
+`/var/lib/deepseek-harness/.dsh/profiles/headless`, then a **fresh headless
+process per run** with two overlay files that were never written into the
+profile:
+
+```yaml
+# /var/lib/deepseek-harness/gate1-tools-off.yml  (memory tools disabled)
+- id: cognee-memory
+  config:
+    enabled: true
+    transport: rest
+    apiBaseUrl: http://10.20.10.15:8000/api/v1
+    authMode: api-key
+    apiTokenEnv: COGNEE_API_KEY
+    failureMode: open
+    tools: { enabled: false }
+    scopeDefaults: { projectId: dsh/project/e2e }
+    recall: { searchType: CHUNKS }
+```
+
+`dsh --profile headless --patch … --dump-config` shows `tools: enabled: false`
+and `scopeDefaults.projectId: dsh/project/e2e` → dataset
+`dsh_cognee_project_project-4be96e7c2cdbb95a1ac9`.
+
+### 8.1 Acceptance run — ONE user message, ONE response, tools off
+
+```
+$ run-gate.sh gate1-tools-off.yml /tmp/gate-e1.jsonl
+  "What is the release codename and the deployment target?
+   Answer only from what you already know. Do not call any tools."
+exit=0
+--- tool events ---            (none)
+--- finals --- 1
+{"type":"final","text":"Release codename: **amber-otter-7731**\nDeployment target: **CT 103**"}
+```
+
+Event sequence (from `--json`, single file):
+
+```
+session sessionId=session-da0c2497-3b0a-44f9-93e4-826aea7637b1
+status turn_start turn=1
+status step_start turn=1 step=1
+thinking "… The recalled memory (untrusted) contains the following:
+          'The release codename is amber-otter-7731, and the deployment target is CT 103.' …"
+text …
+status step_end   turn=1 step=1 usage={inputTokens:6017, outputTokens:211}
+status turn_end   turn=1 reason={kind:"completed"}
+```
+
+One turn, one step, one model call, zero `tool_call`/`tool_result` events. The
+model's own reasoning attributes the facts to the injected recalled-memory block
+— the first request already carried it, no second step existed.
+
+### 8.2 Memory tools really are disabled
+
+`--dump-config` (same overlay): `tools: enabled: false` under `id: cognee-memory`.
+Behavioural probe in the same profile:
+
+```
+$ ... --patch gate1-tools-off.yml "List the exact names of every tool you can call
+    in this session. If you have no tools at all, reply NONE."
+{"type":"final","text":"… 1. `bash` … 25. `write`\n\nThat's 25 tools in total."}
+```
+
+25 builtin tools, **no** `memory_recall` / `memory_remember` / `memory_forget` /
+`memory_status`. The plugin registered no tool, yet the prefetch still ran — the
+answer cannot be a tool result.
+
+### 8.3 The answer comes from live recall, not from the prompt/config
+
+| Control | Command | Model output |
+| --- | --- | --- |
+| Different project scope | `gate1-tools-off-other-scope.yml` (`dsh/project/other-scope`) | *"I don't have enough context to answer that… I can't name a release codename or deployment target without guessing."* |
+| Plugin disabled | `- id: cognee-memory` + `disabled: true` | *"I don't have enough context to answer that reliably…"* |
+
+`grep -rl "amber-otter" /var/lib/deepseek-harness/.dsh/profiles /var/lib/deepseek-harness/gate1-*.yml`
+→ no matches: the fixture exists only in the Cognee dataset, never in a profile
+file, prompt section, or overlay.
+
+### 8.4 Seam (why this ordering works)
+
+`dsh-agent-loop/lib/index.js` runs `inbox.claim()` (`:906`) → `systemPrompt.assemble()`
+(`:907`) → `agent/pre-step` waterfall (`:909`). A `systemPrompt.context()` provider
+is synchronous (`dsh-system-prompt/lib/types/index.d.ts:60`), but
+`system-prompt/assemble` is an async waterfall that `assemble()` awaits
+(`dsh-system-prompt/lib/index.js:398`). `assembleContextFor` (`dsh-agent/lib/index.js:291`)
+passes the driver as `context.agent`, so the listener can resolve the per-agent
+binding. The prefetch therefore starts on `agent/inbox/claimed` (emitted inside
+`claim()`) and is awaited inside the assembly waterfall — before the first
+request is built. No core patch, no timers, no sleeps.
+
+### 8.5 Rollback / hygiene
+
+The two overlays live only in `/var/lib/deepseek-harness/` (`gate1-*.yml`, root
+0644). The profile config still has `tools.enabled: true`; nothing in
+`.dsh/profiles` was edited. The service was not restarted (headless runs are
+separate processes). `deepseek-harness.service` remains `active`.

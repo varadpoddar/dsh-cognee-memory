@@ -16,7 +16,7 @@ npx vitest run
 | --- | --- |
 | `tsc -p tsconfig.json --noEmit` | pass, 0 errors |
 | `tsc -p tsconfig.build.json` (ESM + .d.ts to `lib/`) | pass |
-| Vitest | **25 files / 209 tests passed** in 3.84 s |
+| Vitest | **31 files / 265 tests passed** (Milestone 1 adds 22 prefetch/assembly cases) |
 
 Adapter tests were rewritten against the observed wire format — real paths, multipart
 writes, `searchType`/`datasetIds`/`topK`, grouped search results, dataset-UUID resolution,
@@ -76,3 +76,26 @@ with `memory_status` reporting `reachable: true`.
 * Graph-completion recall id round-trip: those rows have no `document_id`, so `forget`
   intentionally returns `forgotten:false`.
 * Concurrent multi-process writes to the same dataset (not exercised).
+
+
+## Milestone 1 — first-turn retrieval (2026-11-22)
+
+| Check | Result |
+| --- | --- |
+| `tsc -p tsconfig.json --noEmit` | pass |
+| `tsc -p tsconfig.build.json` | pass |
+| `npx vitest run` | **31 files / 265 tests passed** |
+| `npx vitest run --config vitest.live.config.ts` (live Cognee) | **2 tests passed** — fixture `amber-otter-7731` / `CT 103` returned in 1.10 s; `dsh/project/other-scope` returned empty |
+| Real harness, fresh process, 1 user message, 1 response, memory tools disabled | **PASS** — `Release codename: amber-otter-7731 / Deployment target: CT 103`; 1 turn, 1 step, 0 tool events |
+| Memory tools absent in that run | **PASS** — `--dump-config` shows `tools: enabled: false`; model listed 25 builtin tools with no `memory_*` |
+| Answer is not from config/context | **PASS** — different scope and plugin-disabled runs both answer "I don't have enough context…"; `grep` finds no fixture in any profile/overlay |
+
+Details and exact outputs: `LIVE_INTEGRATION.md` §8.
+
+### New coverage (`test/turn-prefetch.test.ts`, 22 cases)
+
+Budget defaults (300/8/900/1500/1), 8-item and 300-token caps, 900-char query clamp,
+claim dedupe, turn invalidation, hard-deadline expiry without stalling, pre-consumed
+budget, one retry then degrade, zero-retry mode, empty results, aborted signal,
+disabled prefetch, cached reuse across steps, first-assembly injection, unbound agent,
+unavailable memory, runtime-context/assistant rejection, cross-agent isolation.
