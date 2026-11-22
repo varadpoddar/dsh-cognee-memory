@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { parseConfig } from '../src/config/schema.js'
 import { SettingsStore } from '../src/settings/store.js'
 import { registerSettingsRoutes, renderSettingsPage, SETTINGS_JSON_PATH, SETTINGS_PAGE_PATH } from '../src/settings/http.js'
+import { MEMORY_INSPECTION_STATES, type SettingsInspection } from '../src/settings/inspect.js'
 import type { WebRouteLike, WebServerLike } from '../src/types.js'
 
 const temporary: string[] = []
@@ -59,7 +60,7 @@ function makeResponse(): { response: ServerResponse; done: Promise<Captured> } {
   return { response, done }
 }
 
-function harness(options: { env?: NodeJS.ProcessEnv; file?: string } = {}) {
+function harness(options: { env?: NodeJS.ProcessEnv; file?: string; inspect?: () => Promise<SettingsInspection | { error: string }> } = {}) {
   const file = options.file ?? join(mkdtempSync(join(tmpdir(), 'cognee-http-')), 'settings.json')
   if (options.file === undefined) temporary.push(file.replace(/\/settings\.json$/, ''))
   const store = new SettingsStore({
@@ -74,7 +75,11 @@ function harness(options: { env?: NodeJS.ProcessEnv; file?: string } = {}) {
       return () => routes.delete(route.path)
     },
   }
-  const disposers = registerSettingsRoutes(webServer, { store, env: options.env ?? {} })
+  const disposers = registerSettingsRoutes(webServer, {
+    store,
+    env: options.env ?? {},
+    ...(options.inspect === undefined ? {} : { inspect: options.inspect }),
+  })
   return {
     store,
     file,
@@ -219,5 +224,186 @@ describe('saving the address', () => {
       JSON.stringify({ apiBaseUrl: 'http://x.local/api/v1' }),
     )
     expect(response.status).toBe(415)
+  })
+})
+
+function inspectionFixture(overrides: Partial<SettingsInspection> = {}): SettingsInspection {
+  return {
+    toggles: {
+      autoRecall: true,
+      autoWrite: true,
+      sources: {
+        apiBaseUrl: 'profile',
+        mcpUrl: 'none',
+        autoRecall: 'profile',
+        autoWrite: 'profile',
+      },
+    },
+    scopes: {
+      principal: 'principal-1',
+      project: 'dsh-project-workspace-demo',
+      defaultWriteScope: 'project',
+      readable: [
+        { scope: 'project', id: 'workspace-demo', dataset: 'dsh-project-workspace-demo' },
+      ],
+    },
+    candidates: {
+      queued: 1,
+      ingested: 2,
+      failed: 0,
+      forgotten: 0,
+      total: 3,
+      operations: [
+        {
+          operationId: 'op-1',
+          idempotencyKey: 'cand-1',
+          operation: 'remember',
+          dataset: 'dsh-project-workspace-demo',
+          state: 'pending',
+          attempts: 0,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          preview: 'pending memory',
+        },
+      ],
+    },
+    ingestion: { succeeded: 2, failed: 0 },
+    recall: {
+      firstTurn: { attempts: 2, hits: 1, misses: 1, hitRate: 0.5 },
+      latency: {
+        recall: { count: 2, p50: 40, p95: 90 },
+        prefetch: { count: 1, p50: 50, p95: 50 },
+      },
+      contextTokens: { last: 210, p95: 300, total: 500 },
+    },
+    memory: {
+      count: 5,
+      datasets: [
+        { id: 'dataset-1', name: 'dsh-project-workspace-demo', dataCount: 5, searchable: true },
+      ],
+      checkedAt: '2026-01-01T00:00:00.000Z',
+    },
+    memories: [
+      {
+        id: 'op-2',
+        dataset: 'dsh-project-workspace-demo',
+        state: 'recall-verified',
+        preview: 'indexed memory',
+        attempts: 1,
+      },
+    ],
+    stateCounts: Object.fromEntries(
+      MEMORY_INSPECTION_STATES.map((state) => [state, 0]),
+    ) as SettingsInspection['stateCounts'],
+    warnings: [],
+    inspectedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('settings toggles and inspection', () => {
+  const env = { COGNEE_MEMORY_SETTINGS_TOKEN: TOKEN }
+
+  it('persists auto-recall and auto-write toggles and applies them without restart', async () => {
+    const h = harness({ env })
+    const response = await h.request(
+      `${SETTINGS_PAGE_PATH}?token=${TOKEN}`,
+      'POST',
+      { ...form, authorization: `Bearer ${TOKEN}` },
+      'apiBaseUrl=http://profile.local:8000/api/v1&enabled=on&autoRecall=on',
+    )
+    expect(response.status).toBe(303)
+    const status = h.store.status()
+    expect(status.autoRecall).toBe(true)
+    expect(status.autoWrite).toBe(false)
+    const stored = JSON.parse(readFileSync(h.file, 'utf8')) as Record<string, unknown>
+    expect(stored).toMatchObject({ autoRecall: true, autoWrite: false })
+  })
+
+  it('renders inspection sections, counts, and the read-only state legend', async () => {
+    const h = harness({ env, inspect: async () => inspectionFixture() })
+    const response = await h.request(`${SETTINGS_PAGE_PATH}?token=${TOKEN}`, 'GET')
+    expect(response.status).toBe(200)
+    expect(response.body).toContain('Inspection (read-only)')
+    expect(response.body).toContain('principal-1')
+    expect(response.body).toContain('dsh-project-workspace-demo')
+    expect(response.body).toContain('50% (1/2)')
+    expect(response.body).toContain('p50 40 ms')
+    expect(response.body).toContain('last 210')
+    expect(response.body).toContain('recall-verified')
+    expect(response.body).toContain('Inspection is read-only in this pass')
+    expect(response.body).toContain('Auto-recall (inject known context)')
+  })
+
+  it('escapes inspection text instead of reflecting markup', async () => {
+    const h = harness({
+      env,
+      inspect: async () =>
+        inspectionFixture({
+          memories: [
+            {
+              id: 'op-x',
+              dataset: '<script>alert(1)</script>',
+              state: 'failed',
+              preview: '</td><img src=x onerror=alert(1)>',
+              reason: '<b>bad</b>',
+            },
+          ],
+        }),
+    })
+    const response = await h.request(`${SETTINGS_PAGE_PATH}?token=${TOKEN}`, 'GET')
+    expect(response.status).toBe(200)
+    expect(response.body).not.toContain('<script>alert(1)</script>')
+    expect(response.body).not.toContain('<img src=x')
+    expect(response.body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+  })
+
+  it('still answers 200 with a degraded note when inspection fails or times out', async () => {
+    const failed = harness({
+      env,
+      inspect: async () => {
+        throw new Error('backend down')
+      },
+    })
+    const first = await failed.request(`${SETTINGS_PAGE_PATH}?token=${TOKEN}`, 'GET')
+    expect(first.status).toBe(200)
+    expect(first.body).toContain('Inspection unavailable')
+
+    const reported = harness({ env, inspect: async () => ({ error: 'no principal' }) })
+    const second = await reported.request(`${SETTINGS_PAGE_PATH}?token=${TOKEN}`, 'GET')
+    expect(second.status).toBe(200)
+    expect(second.body).toContain('Inspection unavailable: no principal')
+  })
+
+  it('exposes toggles and inspection in JSON while keeping the old fields', async () => {
+    const h = harness({ env, inspect: async () => inspectionFixture() })
+    const response = await h.request(`${SETTINGS_JSON_PATH}?token=${TOKEN}`, 'GET')
+    expect(response.status).toBe(200)
+    const body = JSON.parse(response.body) as Record<string, unknown>
+    expect(body).toMatchObject({
+      endpoint: 'http://profile.local:8000/api/v1',
+      enabled: true,
+      autoRecall: true,
+      autoWrite: true,
+      toggles: { autoRecall: true, autoWrite: true },
+    })
+    expect(body.credential).toEqual({
+      variable: 'COGNEE_API_KEY',
+      state: 'unset',
+    })
+    expect(body.inspection).toMatchObject({ scopes: { principal: 'principal-1' } })
+  })
+
+  it('keeps the inspect hook behind authentication', async () => {
+    let called = 0
+    const h = harness({
+      env,
+      inspect: async () => {
+        called += 1
+        return inspectionFixture()
+      },
+    })
+    expect((await h.request(SETTINGS_PAGE_PATH, 'GET')).status).toBe(401)
+    expect((await h.request(SETTINGS_JSON_PATH, 'GET')).status).toBe(401)
+    expect(called).toBe(0)
   })
 })

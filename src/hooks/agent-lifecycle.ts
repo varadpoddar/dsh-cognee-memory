@@ -2,7 +2,7 @@ import type { CogneeMemoryConfig } from '../config/schema.js'
 import type { RecallService } from '../memory/recall.js'
 import { identityFromAgent } from '../memory/scopes.js'
 import type { Metrics } from '../telemetry/metrics.js'
-import type { AgentLike, PluginContextLike } from '../types.js'
+import type { AgentLike, PluginContextLike, RecallHit } from '../types.js'
 import {
   MemoryPromptContext,
   applyMemoryContext,
@@ -102,6 +102,7 @@ export function registerAgentLifecycle(
     readonly coordinator: { readonly recallService: Pick<RecallService, 'safeRecall'> }
     readonly config: CogneeMemoryConfig
     readonly metrics?: Metrics
+    readonly verification?: { record(hits: readonly RecallHit[]): void }
   },
 ): () => void {
   const bindings = new Map<string, AgentBinding>()
@@ -125,6 +126,7 @@ export function registerAgentLifecycle(
         config: deps.config,
         identity,
         ...(deps.metrics === undefined ? {} : { metrics: deps.metrics }),
+        ...(deps.verification === undefined ? {} : { verification: deps.verification }),
       })
       const dispose = controller.register({ systemPrompt: promptContext })
       bindings.set(sessionId, { controller, dispose })

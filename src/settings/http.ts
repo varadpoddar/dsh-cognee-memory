@@ -10,11 +10,16 @@
  * that token as `Authorization: Bearer ...` or `?token=...`.
  *
  * Nothing here ever reads, stores, echoes, or logs the Cognee API key. The page
- * reports only whether the configured key variable is set.
+ * reports only whether the configured key variable is set. Milestone 9 adds
+ * read-only inspection (`SettingsInspection`): auto-recall/auto-write toggles,
+ * scope inspection, candidate queue, ingestion counts, recall hit rate and
+ * latency percentiles, context tokens, memory count, and per-memory states.
  */
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { SETTINGS_TOKEN_ENV, type SettingsStatus, type SettingsStore } from './store.js'
+import { MEMORY_INSPECTION_STATES, type SettingsInspection } from './inspect.js'
+import { withTimeout } from '../memory/context-format.js'
 import type { WebServerLike } from '../types.js'
 
 /** Path of the settings page. */
@@ -24,11 +29,15 @@ export const SETTINGS_JSON_PATH = '/plugins/cognee-memory/settings.json'
 
 /** A settings form is small; anything larger is not a submission. */
 const MAX_BODY_BYTES = 8_192
+const INSPECTION_TIMEOUT_MS = 2_500
 
 export interface SettingsRoutesOptions {
   readonly store: SettingsStore
   readonly env?: NodeJS.ProcessEnv
   readonly logger?: (message: string) => void
+  /** Read-only inspection; omitted profiles get a "not wired" note, never an error. */
+  readonly inspect?: () => Promise<SettingsInspection | { error: string }>
+  readonly inspectionTimeoutMs?: number
 }
 
 type Authorization = { readonly ok: true } | { readonly ok: false; readonly status: 401 | 503; readonly message: string }
@@ -81,10 +90,114 @@ function pageToken(url: URL): string {
   return token === null ? '' : token
 }
 
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return '0%'
+  return `${Math.round(value * 1000) / 10}%`
+}
+
+function renderInspection(inspection: SettingsInspection | undefined, error: string | undefined): string {
+  if (inspection === undefined) {
+    return `<fieldset><legend>Inspection</legend><p class="hint">${
+      error === undefined
+        ? 'Inspection is not wired in this profile.'
+        : `Inspection unavailable: ${escapeHtml(error)}`
+    }</p></fieldset>`
+  }
+  const operations = inspection.candidates.operations
+  const operationRows =
+    operations.length === 0
+      ? '<tr><td colspan="6">No queued or completed write operations.</td></tr>'
+      : operations
+          .map(
+            (operation) => `<tr>
+  <td>${escapeHtml(operation.state)}</td>
+  <td>${escapeHtml(operation.operation)}</td>
+  <td>${escapeHtml(operation.dataset)}</td>
+  <td>${operation.attempts}</td>
+  <td>${escapeHtml(operation.reason ?? '')}</td>
+  <td>${escapeHtml(operation.preview)}</td>
+</tr>`,
+          )
+          .join('')
+  const memories = inspection.memories
+  const memoryRows =
+    memories.length === 0
+      ? '<tr><td colspan="5">No memories recorded in this process.</td></tr>'
+      : memories
+          .map(
+            (row) => `<tr>
+  <td>${escapeHtml(row.state)}</td>
+  <td>${escapeHtml(row.dataset)}</td>
+  <td>${escapeHtml(row.preview)}</td>
+  <td>${row.attempts ?? ''}</td>
+  <td>${escapeHtml(row.reason ?? '')}</td>
+</tr>`,
+          )
+          .join('')
+  const scopes =
+    inspection.scopes.readable.length === 0
+      ? '<tr><td colspan="3">No readable scope.</td></tr>'
+      : inspection.scopes.readable
+          .map(
+            (scope) =>
+              `<tr><td>${escapeHtml(scope.scope)}</td><td>${escapeHtml(scope.id)}</td><td>${escapeHtml(scope.dataset)}</td></tr>`,
+          )
+          .join('')
+  const datasets =
+    inspection.memory.datasets.length === 0
+      ? '<tr><td colspan="3">No dataset inventory available.</td></tr>'
+      : inspection.memory.datasets
+          .map(
+            (dataset) =>
+              `<tr><td>${escapeHtml(dataset.name)}</td><td>${dataset.dataCount ?? '?'}</td><td>${
+                dataset.searchable === undefined ? (dataset.state === undefined ? '' : escapeHtml(dataset.state)) : dataset.searchable ? 'searchable' : 'not searchable'
+              }</td></tr>`,
+          )
+          .join('')
+  const legend = MEMORY_INSPECTION_STATES.map(
+    (state) => `${escapeHtml(state)}: ${inspection.stateCounts[state]}`,
+  ).join(' · ')
+
+  return `<fieldset>
+  <legend>Inspection (read-only)</legend>
+  <dl>
+    <dt>Principal</dt><dd>${escapeHtml(inspection.scopes.principal)}</dd>
+    <dt>Project dataset</dt><dd>${escapeHtml(inspection.scopes.project)}</dd>
+    <dt>Default write scope</dt><dd>${escapeHtml(inspection.scopes.defaultWriteScope)}</dd>
+    <dt>Memory count</dt><dd>${inspection.memory.count === null ? 'unknown' : inspection.memory.count}</dd>
+    <dt>Ingestion</dt><dd>${inspection.ingestion.succeeded} succeeded · ${inspection.ingestion.failed} failed</dd>
+    <dt>First-turn recall</dt><dd>${formatPercent(inspection.recall.firstTurn.hitRate)} (${inspection.recall.firstTurn.hits}/${inspection.recall.firstTurn.attempts})</dd>
+    <dt>Recall latency</dt><dd>p50 ${inspection.recall.latency.recall.p50} ms · p95 ${inspection.recall.latency.recall.p95} ms (n=${inspection.recall.latency.recall.count})</dd>
+    <dt>Prefetch latency</dt><dd>p50 ${inspection.recall.latency.prefetch.p50} ms · p95 ${inspection.recall.latency.prefetch.p95} ms (n=${inspection.recall.latency.prefetch.count})</dd>
+    <dt>Context tokens</dt><dd>last ${inspection.recall.contextTokens.last} · p95 ${inspection.recall.contextTokens.p95} · total ${inspection.recall.contextTokens.total}</dd>
+    <dt>Candidate queue</dt><dd>${inspection.candidates.queued} queued · ${inspection.candidates.ingested} ingested · ${inspection.candidates.failed} failed · ${inspection.candidates.total} accepted</dd>
+  </dl>
+  <p class="hint">States — ${legend}</p>
+  <h2>Readable scopes</h2>
+  <table><thead><tr><th>Scope</th><th>Id</th><th>Dataset</th></tr></thead><tbody>${scopes}</tbody></table>
+  <h2>Candidate / write queue</h2>
+  <table><thead><tr><th>State</th><th>Op</th><th>Dataset</th><th>Attempts</th><th>Reason</th><th>Preview</th></tr></thead><tbody>${operationRows}</tbody></table>
+  <h2>Datasets</h2>
+  <table><thead><tr><th>Dataset</th><th>Records</th><th>State</th></tr></thead><tbody>${datasets}</tbody></table>
+  <h2>Memories</h2>
+  <table><thead><tr><th>State</th><th>Dataset</th><th>Preview</th><th>Attempts</th><th>Reason</th></tr></thead><tbody>${memoryRows}</tbody></table>
+  <p class="hint">Inspection is read-only in this pass: deletion, correction, and consolidation are deferred.
+  Inspected at ${escapeHtml(inspection.inspectedAt)}.${
+    inspection.memory.degraded === undefined ? '' : ` ${escapeHtml(inspection.memory.degraded)}.`
+  }</p>
+</fieldset>`
+}
+
 /** Render the settings page. Every interpolated value is HTML-escaped. */
 export function renderSettingsPage(
   status: SettingsStatus,
-  options: { readonly errors?: readonly string[]; readonly notice?: string; readonly token?: string } = {},
+  options: {
+    readonly errors?: readonly string[]
+    readonly notice?: string
+    readonly token?: string
+    readonly inspection?: SettingsInspection
+    readonly inspectionError?: string
+  } = {},
 ): string {
   const token = options.token ?? ''
   // `action=""` reposts to this exact URL, so the ?token= stays in the address
@@ -105,8 +218,9 @@ export function renderSettingsPage(
 <title>Cognee memory settings</title>
 <style>
 :root{color-scheme:light dark}
-body{font:15px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:44rem;padding:0 1rem}
+body{font:15px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:56rem;padding:0 1rem}
 h1{font-size:1.35rem;margin:0 0 .25rem}
+h2{font-size:1rem;margin:1.2rem 0 .4rem}
 p.sub{margin:0 0 1.25rem;opacity:.75}
 fieldset{border:1px solid #8884;border-radius:.5rem;padding:1rem;margin:0 0 1rem}
 legend{padding:0 .4rem;font-weight:600}
@@ -117,6 +231,10 @@ input[type=url]{width:100%;box-sizing:border-box;padding:.45rem;font:inherit;bor
 dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.5rem 0 0;font-size:.92em}
 dt{opacity:.7}
 dd{margin:0;font-family:ui-monospace,monospace;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:.85em;margin:.2rem 0 0}
+th,td{text-align:left;vertical-align:top;padding:.3rem .4rem;border-top:1px solid #8883}
+th{opacity:.7;font-weight:600}
+td{word-break:break-word}
 button{padding:.5rem 1rem;font:inherit;border-radius:.35rem;border:1px solid #8888;cursor:pointer}
 .err{border:1px solid #c44;background:#c4411f22;padding:.6rem .8rem;border-radius:.4rem;margin:0 0 1rem}
 .ok{border:1px solid #2a2;background:#2a222;background:#2a22;padding:.6rem .8rem;border-radius:.4rem;margin:0 0 1rem}
@@ -125,7 +243,7 @@ code{font-family:ui-monospace,monospace}
 <body>
 <h1>Cognee memory settings</h1>
 <p class="sub">Saved to <code>${escapeHtml(status.filePath)}</code>. The address applies to subsequent
-memory tools calls; no restart is needed for a URL or enable/disable change.</p>
+memory tools calls; no restart is needed for a URL, toggle, or enable/disable change.</p>
 ${notice}${errors}
 <form method="post" action="${escapeHtml(action)}">
   <fieldset>
@@ -140,6 +258,14 @@ ${notice}${errors}
       <input id="enabled" name="enabled" type="checkbox"${status.enabled ? ' checked' : ''}>
       <label for="enabled" style="margin:0">Memory enabled</label>
     </div>
+    <div class="row">
+      <input id="autoRecall" name="autoRecall" type="checkbox"${status.autoRecall ? ' checked' : ''}>
+      <label for="autoRecall" style="margin:0">Auto-recall (inject known context)</label>
+    </div>
+    <div class="row">
+      <input id="autoWrite" name="autoWrite" type="checkbox"${status.autoWrite ? ' checked' : ''}>
+      <label for="autoWrite" style="margin:0">Auto-write (extract from committed turns)</label>
+    </div>
   </fieldset>
   <fieldset>
     <legend>Credential</legend>
@@ -152,6 +278,7 @@ ${notice}${errors}
   </fieldset>
   <button type="submit">Save settings</button>
 </form>
+${renderInspection(options.inspection, options.inspectionError)}
 </body></html>
 `
 }
@@ -188,6 +315,19 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   send(res, status, html, 'text/html; charset=utf-8')
 }
 
+async function inspectWithDeadline(
+  options: SettingsRoutesOptions,
+): Promise<{ inspection?: SettingsInspection; error?: string }> {
+  if (options.inspect === undefined) return {}
+  try {
+    const result = await withTimeout(options.inspect(), options.inspectionTimeoutMs ?? INSPECTION_TIMEOUT_MS)
+    if ('error' in result) return { error: result.error }
+    return { inspection: result }
+  } catch {
+    return { error: 'inspection did not complete in time' }
+  }
+}
+
 /**
  * Register the settings routes. Returns their disposers; a caller that registered
  * inside a Cordis effect gets the same cleanup from the owning fiber.
@@ -214,7 +354,16 @@ export function registerSettingsRoutes(
           }
           const token = pageToken(url)
           if ((req.method ?? 'GET').toUpperCase() === 'GET') {
-            sendHtml(res, 200, renderSettingsPage(store.status(), { token }))
+            const { inspection, error } = await inspectWithDeadline(options)
+            sendHtml(
+              res,
+              200,
+              renderSettingsPage(store.status(), {
+                token,
+                ...(inspection === undefined ? {} : { inspection }),
+                ...(error === undefined ? {} : { inspectionError: error }),
+              }),
+            )
             return
           }
           if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
@@ -237,10 +386,22 @@ export function registerSettingsRoutes(
             apiBaseUrl: form.get('apiBaseUrl') ?? '',
             mcpUrl: form.get('mcpUrl') ?? '',
             enabled: form.get('enabled') === 'on' || form.get('enabled') === 'true',
+            autoRecall: form.get('autoRecall') === 'on' || form.get('autoRecall') === 'true',
+            autoWrite: form.get('autoWrite') === 'on' || form.get('autoWrite') === 'true',
           })
           if (!result.ok) {
             options.logger?.(`cognee-memory settings: rejected a change (${result.errors.join('; ')})`)
-            sendHtml(res, 400, renderSettingsPage(store.status(), { errors: result.errors, token }))
+            const { inspection, error } = await inspectWithDeadline(options)
+            sendHtml(
+              res,
+              400,
+              renderSettingsPage(store.status(), {
+                errors: result.errors,
+                token,
+                ...(inspection === undefined ? {} : { inspection }),
+                ...(error === undefined ? {} : { inspectionError: error }),
+              }),
+            )
             return
           }
           options.logger?.(`cognee-memory settings: endpoint updated to ${result.config.apiBaseUrl}`)
@@ -265,14 +426,20 @@ export function registerSettingsRoutes(
             return
           }
           const status = store.status()
+          const { inspection, error } = await inspectWithDeadline(options)
           sendJson(res, 200, {
             endpoint: status.endpoint,
             mcpUrl: status.mcpUrl ?? null,
             enabled: status.enabled,
+            autoRecall: status.autoRecall,
+            autoWrite: status.autoWrite,
             sources: status.sources,
             filePath: status.filePath,
             credential: { variable: status.keyVar, state: status.keySet ? 'set' : 'unset' },
             warnings: status.warnings,
+            toggles: { autoRecall: status.autoRecall, autoWrite: status.autoWrite },
+            inspection: inspection ?? null,
+            ...(error === undefined ? {} : { inspectionError: error }),
           })
         })()
       },

@@ -36,6 +36,8 @@ export interface RetrievalDependencies {
   readonly identity: CallerIdentity
   readonly metrics?: Metrics
   readonly now?: () => number
+  /** Read-only ledger of record ids a recall returned (settings inspection). */
+  readonly verification?: { record(hits: readonly RecallHit[]): void }
 }
 
 export interface RetrievalRequest {
@@ -105,6 +107,7 @@ export class RetrievalCoordinator {
   private readonly identity: CallerIdentity
   private readonly metrics: Metrics | undefined
   private readonly now: () => number
+  private readonly verification: { record(hits: readonly RecallHit[]): void } | undefined
   private stableCache: StableCache | undefined
 
   constructor(dependencies: RetrievalDependencies) {
@@ -113,6 +116,7 @@ export class RetrievalCoordinator {
     this.identity = dependencies.identity
     this.metrics = dependencies.metrics
     this.now = dependencies.now ?? Date.now
+    this.verification = dependencies.verification
   }
 
   /** Authorized scopes decide which datasets may be searched; never user text. */
@@ -212,6 +216,7 @@ export class RetrievalCoordinator {
       Math.max(0, budget.maxItems - stable.hits.length),
     )
     const selected = [...stable.hits, ...specific.hits]
+    this.verification?.record(selected)
     const block = formatMemoryBlock(selected, {
       maxTokens: combinedCap,
       maxItems: budget.maxItems,

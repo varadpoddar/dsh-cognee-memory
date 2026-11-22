@@ -50,9 +50,11 @@ describe.skipIf(apiKey === undefined || apiKey === '')('first-turn prefetch (liv
     const elapsed = Date.now() - started
     expect(block).toContain('amber-otter-7731')
     expect(block).toContain('CT 103')
-    expect(estimateTokens(block)).toBeLessThanOrEqual(config.prefetch.maxTokens)
+    expect(estimateTokens(block)).toBeLessThanOrEqual(
+      config.retrieval.stableTokens + config.retrieval.queryTokens,
+    )
     expect(elapsed).toBeLessThan(config.prefetch.timeoutMs + 1_000)
-    expect(config.prefetch.maxItems).toBe(8)
+    expect(config.retrieval.maxItems).toBe(8)
   }, 30_000)
 
   it('returns nothing for a different project scope', async () => {

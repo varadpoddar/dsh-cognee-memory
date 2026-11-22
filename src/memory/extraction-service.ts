@@ -30,8 +30,18 @@ export interface ExtractionSnapshot {
   readonly scope: string
   readonly queue: CandidateQueueStatus
   readonly outbox: OutboxStatus
+  /** Read-only candidate queue view for the settings page (bounded, redacted). */
+  readonly pendingCandidates: readonly PendingCandidateView[]
   readonly lastCandidates: readonly MemoryCandidate[]
   readonly lastError?: string
+}
+
+export interface PendingCandidateView {
+  readonly id: string
+  readonly idempotencyKey: string
+  readonly operation: string
+  readonly semanticKey: string
+  readonly preview: string
 }
 
 export interface ExtractionServiceOptions {
@@ -280,6 +290,13 @@ export class ExtractionService {
       scope: this.config.extraction.scope,
       queue: await this.queue.status(),
       outbox: await this.outbox.status(),
+      pendingCandidates: (await this.queue.pending()).slice(0, 20).map((candidate) => ({
+        id: candidate.id,
+        idempotencyKey: candidate.idempotencyKey,
+        operation: candidate.operation,
+        semanticKey: candidate.semanticKey,
+        preview: candidate.content.replace(/\s+/g, ' ').trim().slice(0, 160),
+      })),
       lastCandidates: this.lastCandidates,
       ...(this.lastError === undefined ? {} : { lastError: this.lastError }),
     }

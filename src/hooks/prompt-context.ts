@@ -31,6 +31,8 @@ export interface PromptContextDependencies {
   readonly metrics?: Metrics
   /** Injectable clock so prefetch deadlines are testable without sleeping. */
   readonly now?: () => number
+  /** Read-only recall ledger shared with the settings page. */
+  readonly verification?: { record(hits: readonly RecallHit[]): void }
 }
 
 export interface PromptRefreshRequest {
@@ -177,6 +179,9 @@ export class MemoryPromptContext {
       config: dependencies.config,
       identity: dependencies.identity,
       ...(dependencies.metrics === undefined ? {} : { metrics: dependencies.metrics }),
+      ...(dependencies.verification === undefined
+        ? {}
+        : { verification: dependencies.verification }),
       now: this.now,
     })
     this.scopeKey = this.fingerprint()

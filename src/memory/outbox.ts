@@ -71,6 +71,7 @@ export interface OutboxStatus {
 
 export interface OutboxOperationView {
   readonly operationId: string
+  readonly idempotencyKey: string
   readonly operation: OutboxOperationKind
   readonly dataset: string
   readonly state: OutboxState
@@ -78,6 +79,8 @@ export interface OutboxOperationView {
   readonly reason?: string
   readonly dataRef?: string
   readonly updatedAt: string
+  /** Bounded, already-redacted memory preview for read-only inspection. */
+  readonly preview: string
 }
 
 export type OutboxSinkResult =
@@ -411,6 +414,7 @@ export class Outbox {
       .slice(0, 50)
       .map((operation) => ({
         operationId: operation.operationId,
+        idempotencyKey: operation.idempotencyKey,
         operation: operation.operation,
         dataset: operation.dataset,
         state: operation.state,
@@ -418,6 +422,7 @@ export class Outbox {
         ...(operation.reason === undefined ? {} : { reason: operation.reason }),
         ...(operation.dataRef === undefined ? {} : { dataRef: operation.dataRef }),
         updatedAt: operation.updatedAt,
+        preview: operation.content.replace(/\s+/g, ' ').trim().slice(0, 160),
       }))
     return {
       ...counts,

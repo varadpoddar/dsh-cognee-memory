@@ -129,7 +129,12 @@ describe('plugin entry', () => {
       'llm/stream',
       'session/disposed',
       'session/event',
+      'subagent/end',
       'system-prompt/assemble',
+      'workflow/agent-end',
+    ])
+    expect(fake.sections.map((entry) => entry.registration.name)).toEqual([
+      'cognee:memory-policy',
     ])
     expect(typeof dispose).toBe('function')
   })
@@ -151,7 +156,12 @@ describe('plugin entry', () => {
       'llm/stream',
       'session/disposed',
       'session/event',
+      'subagent/end',
       'system-prompt/assemble',
+      'workflow/agent-end',
+    ])
+    expect(fake.sections.map((entry) => entry.registration.name)).toEqual([
+      'cognee:memory-policy',
     ])
     expect(typeof dispose).toBe('function')
   })

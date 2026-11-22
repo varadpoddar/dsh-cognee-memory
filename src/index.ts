@@ -16,7 +16,11 @@ import { MemoryCoordinator } from './memory/coordinator.js'
 import { Metrics } from './telemetry/metrics.js'
 import { registerAgentLifecycle } from './hooks/agent-lifecycle.js'
 import { registerSessionExtraction } from './hooks/session-events.js'
+import { MEMORY_POLICY_SECTION } from './hooks/prompt-context.js'
+import { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycle.js'
 import { ExtractionService } from './memory/extraction-service.js'
+import { RecallVerificationLedger } from './memory/recall-verification.js'
+import { buildInspection } from './settings/inspect.js'
 import { SettingsStore, resolveSettingsPath } from './settings/store.js'
 import { registerSettingsRoutes } from './settings/http.js'
 import { createRecallTool } from './tools/recall.js'
@@ -52,9 +56,19 @@ export {
 export { validateCogneeUrl } from './settings/url.js'
 export { MemoryError, UnsupportedOperationError, RedactionBlockedError } from './errors.js'
 export { MemoryPromptContext } from './hooks/prompt-context.js'
-export { TaskLifecycleRecorder } from './hooks/task-lifecycle.js'
+export { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycle.js'
 export { ExtractionService } from './memory/extraction-service.js'
 export { CandidateQueue } from './memory/candidate-queue.js'
+export { Outbox } from './memory/outbox.js'
+export { RetrievalCoordinator } from './memory/retrieval.js'
+export { RecallVerificationLedger } from './memory/recall-verification.js'
+export {
+  buildInspection,
+  MEMORY_INSPECTION_STATES,
+  type SettingsInspection,
+  type MemoryInspectionState,
+} from './settings/inspect.js'
+export { MEMORY_POLICY_SECTION } from './hooks/prompt-context.js'
 export {
   extractDeterministicCandidates,
   extractWithLlm,
@@ -94,6 +108,9 @@ export function apply(
   const metrics = new Metrics()
   const adapter = createMemoryAdapter({ config, metrics, env: process.env, endpoint })
   const coordinator = new MemoryCoordinator({ adapter, config, metrics, endpoint })
+  // Bounded, read-only record of ids a recall actually returned; feeds the
+  // settings page's `recall-verified` state.
+  const verification = new RecallVerificationLedger()
 
   const disposers: Array<() => unknown> = []
   let disposed = false
@@ -111,7 +128,21 @@ export function apply(
     disposers.length = 0
   }
 
-  disposers.push(registerAgentLifecycle(ctx, { coordinator, config, metrics }))
+  // The data-not-instructions property is system text, registered once. The
+  // per-turn memory block stays compact and carries no warning preamble.
+  disposers.push(ctx.systemPrompt.section(MEMORY_POLICY_SECTION))
+
+  disposers.push(
+    registerAgentLifecycle(ctx, { coordinator, config, metrics, verification }),
+  )
+
+  // Authoritative task memory: verified host lifecycle settlements only.
+  const taskRecorder = new TaskLifecycleRecorder({ coordinator, config, metrics })
+  if (config.taskMemory.enabled) {
+    disposers.push(
+      registerTaskMemory(ctx, { recorder: taskRecorder, coordinator, config, metrics }),
+    )
+  }
 
   // Automatic extraction runs independently of tools. It watches the
   // post-commit session feed, so `tools.enabled: false` changes nothing here.
@@ -126,11 +157,26 @@ export function apply(
   // profile without a web server never reads an un-injected service (Cordis
   // throws on such property reads). Plain test doubles that already expose
   // `webServer` but no `inject` take the direct branch.
+  const inspect = (): ReturnType<typeof buildInspection> =>
+    buildInspection({
+      store: settings,
+      metrics,
+      coordinator,
+      identity: {},
+      defaultWriteScope: config.scopes.defaultWriteScope,
+      extraction,
+      ...(adapter.inventory === undefined
+        ? {}
+        : { inventory: () => adapter.inventory?.() ?? Promise.resolve(undefined) }),
+      verification,
+    })
+
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer'], (webCtx) => {
       if (disposed) return
       for (const disposeRoutes of registerSettingsRoutes(webCtx.webServer as WebServerLike, {
         store: settings,
+        inspect,
       })) {
         disposers.push(disposeRoutes)
       }
@@ -143,7 +189,7 @@ export function apply(
       webServer = undefined
     }
     if (webServer !== undefined) {
-      for (const disposeRoutes of registerSettingsRoutes(webServer, { store: settings })) {
+      for (const disposeRoutes of registerSettingsRoutes(webServer, { store: settings, inspect })) {
         disposers.push(disposeRoutes)
       }
     }

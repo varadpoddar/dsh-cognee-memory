@@ -273,8 +273,10 @@ describe('Outbox', () => {
     expect(status.complete).toBe(60)
     expect(status.operations).toHaveLength(50)
     const serialized = JSON.stringify(status)
-    expect(serialized).not.toContain('memory 0')
     expect(serialized).not.toMatch(/secret|api[_-]?key|password/i)
+    for (const operation of status.operations) {
+      expect(operation.preview.length).toBeLessThanOrEqual(160)
+    }
   })
 
   it('keys operations by idempotency key and candidate version', async () => {

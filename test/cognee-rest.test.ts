@@ -341,6 +341,24 @@ describe('CogneeRestAdapter (verified live contract)', () => {
     expect(server.requests.some((request) => request.url === '/api/v1/forget')).toBe(false)
   })
 
+  it('reports a read-only dataset inventory with record counts', async () => {
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    fake.data.set(PROJECT_DATASET, [
+      { id: DATA_ID, name: 'text_1', contentHash: 'hash-1' },
+    ])
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const inventory = await adapter.inventory()
+    expect(inventory.datasets).toEqual([
+      { id: PROJECT_DATASET, name: scopeKey(project), dataCount: 1 },
+    ])
+    expect(inventory.totalRecords).toBe(1)
+    expect(inventory.checkedAt).toMatch(/Z$/)
+    expect(JSON.stringify(inventory)).not.toContain('test-key')
+    expect(JSON.stringify(inventory)).not.toContain('the deploy target is blue')
+  })
+
   it('reports status and health (origin-relative /health) without leaking the key', async () => {
     const fake = fakeCognee()
     fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })

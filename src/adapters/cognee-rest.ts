@@ -8,13 +8,19 @@ import type {
   ForgetResult,
   HealthResult,
   MemoryAdapter,
+  MemoryInventory,
   RecallHit,
   RecallQuery,
   RememberInput,
   RememberResult,
   ScopeRef,
 } from '../types.js'
-import { DatasetRegistry, isUuid, type CogneeDataset } from './cognee-datasets.js'
+import {
+  DatasetRegistry,
+  isUuid,
+  parseDatasetList,
+  type CogneeDataset,
+} from './cognee-datasets.js'
 import { COGNEE_PATHS } from './cognee-paths.js'
 import {
   contentHashOf,
@@ -223,6 +229,46 @@ export class CogneeRestAdapter implements MemoryAdapter {
       id: input.id,
       scope: input.scope,
       forgotten: parseForgetResponse(response),
+    }
+  }
+
+  /** Read-only dataset and record inventory for the settings page (Milestone 9). */
+  async inventory(signal?: AbortSignal): Promise<MemoryInventory> {
+    const checkedAt = new Date(this.now()).toISOString()
+    const response = await this.client.requestJson<unknown>({
+      method: 'GET',
+      path: COGNEE_PATHS.datasets,
+      operation: 'datasets.inventory',
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const all = parseDatasetList(response)
+    const bounded = all.slice(0, 10)
+    const counts = await Promise.all(
+      bounded.map(async (dataset) => {
+        try {
+          return (await this.listData(dataset.id, signal)).length
+        } catch {
+          return undefined
+        }
+      }),
+    )
+    const datasets = bounded.map((dataset, index) => {
+      const dataCount = counts[index]
+      return {
+        id: dataset.id,
+        name: dataset.name,
+        ...(dataCount === undefined ? {} : { dataCount }),
+      }
+    })
+    const complete = datasets.every((dataset) => dataset.dataCount !== undefined)
+    const totalRecords = complete
+      ? datasets.reduce((sum, dataset) => sum + (dataset.dataCount ?? 0), 0)
+      : undefined
+    return {
+      datasets,
+      ...(totalRecords === undefined ? {} : { totalRecords }),
+      checkedAt,
+      ...(all.length > bounded.length ? { truncated: true } : {}),
     }
   }
 
