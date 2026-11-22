@@ -132,7 +132,9 @@ function fakeCognee(options: { ownerId?: string; memoryUntilReady?: number } = {
                 document_id: DATA_ID,
                 document_name: 'text_1',
                 created_at: 1_795_307_390_969,
-                score: 0.87,
+                // CHUNKS rows carry a vector distance (0 = identical); the
+                // adapter converts it to the plugin's similarity contract.
+                score: 0.13,
                 belongs_to_set: ['ops'],
               },
             ],
@@ -273,6 +275,7 @@ describe('CogneeRestAdapter (verified live contract)', () => {
       metadata: { datasetId: PROJECT_DATASET, datasetName: scopeKey(project), tags: ['ops'] },
     })
     expect(hits[0]?.score).toBeCloseTo(0.87)
+    expect(hits[0]?.record.text).toBe('the deploy target is blue')
     const search = server.requests.find((request) => request.url === '/api/v1/search')
     expect(JSON.parse(search?.body ?? '{}')).toMatchObject({
       query: 'deploy target',
@@ -280,6 +283,49 @@ describe('CogneeRestAdapter (verified live contract)', () => {
       datasetIds: [PROJECT_DATASET],
       topK: 5,
     })
+  })
+
+  it('converts CHUNKS distance scores to similarity and keeps the closest first', async () => {
+    // Observed Cognee 1.6.10-local: an exact match scored 0.0486, unrelated
+    // memories 0.39–0.49, returned in ascending distance. Left raw, the
+    // descending sort in RecallService would rank the least relevant first.
+    const fake = fakeCognee()
+    fake.datasets.push({ id: PROJECT_DATASET, name: scopeKey(project), ownerId: USER_ID })
+    server = await startMockServer(async (request) => {
+      const url = new URL(request.url ?? '/', 'http://mock')
+      if (url.pathname === '/api/v1/search') {
+        return json([
+          {
+            dataset_id: PROJECT_DATASET,
+            dataset_name: scopeKey(project),
+            dataset_tenant_id: null,
+            search_result: [
+              {
+                id: 'chunk-close',
+                text: 'the maintenance window is 03:00-04:00',
+                document_id: '66666666-6666-4666-8666-666666666666',
+                score: 0.0486,
+              },
+              {
+                id: 'chunk-far',
+                text: 'an unrelated project convention',
+                document_id: '77777777-7777-4777-8777-777777777777',
+                score: 0.46,
+              },
+            ],
+          },
+        ])
+      }
+      return fake.handler(request)
+    })
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const hits = await adapter.recall({ text: 'maintenance window', scopes: [project], limit: 5 })
+    expect(hits.map((hit) => hit.record.text)).toEqual([
+      'the maintenance window is 03:00-04:00',
+      'an unrelated project convention',
+    ])
+    expect(hits[0]?.score).toBeCloseTo(0.9514)
+    expect(hits[1]?.score).toBeCloseTo(0.54)
   })
 
   it('degrades recall quietly when the latency budget expires (open mode)', async () => {

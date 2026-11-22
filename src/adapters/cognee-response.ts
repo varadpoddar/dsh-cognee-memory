@@ -121,6 +121,19 @@ function scoreOf(value: number | undefined): number {
   return Math.min(1, Math.max(0, value))
 }
 
+/**
+ * Cognee `/search` with `CHUNKS` ranks by vector *distance* in `score`
+ * (observed 2026-11-22 on Cognee 1.6.10-local: an exact match scored
+ * 0.0486, unrelated memories 0.39–0.49, and the backend returned ascending
+ * distance). The plugin's contract is similarity — higher is better — and
+ * `RecallService` sorts descending, so a raw distance would put the *least*
+ * relevant memory first. Convert at the boundary.
+ */
+function similarityFromDistance(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0
+  return Math.min(1, Math.max(0, 1 - value))
+}
+
 function createdAtOf(value: unknown, fallback: string): string {
   if (typeof value === 'number' && Number.isFinite(value)) {
     // Observed live: `created_at` is epoch milliseconds (e.g. 1795307390969).
@@ -267,6 +280,7 @@ export function parseSearchResponse(
   nowIso: string,
   maxRows = 100,
   scopeByDatasetId?: ReadonlyMap<string, ScopeRef>,
+  scoreIsDistance = false,
 ): RecallHit[] {
   const hits: RecallHit[] = []
   for (const group of parseSearchGroups(response)) {
@@ -331,7 +345,9 @@ export function parseSearchResponse(
                 },
               }),
         },
-        score: scoreOf(pickNumber(row, SCORE_KEYS)),
+        score: scoreIsDistance
+          ? similarityFromDistance(pickNumber(row, SCORE_KEYS))
+          : scoreOf(pickNumber(row, SCORE_KEYS)),
       })
     })
   }

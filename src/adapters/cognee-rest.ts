@@ -205,7 +205,16 @@ export class CogneeRestAdapter implements MemoryAdapter {
     }
 
     const nowIso = new Date(this.now()).toISOString()
-    return parseSearchResponse(response, query.scopes, nowIso, query.limit, scopeByDatasetId)
+    // CHUNKS rows carry a vector distance; convert it to the plugin's
+    // similarity contract so higher always means more relevant.
+    return parseSearchResponse(
+      response,
+      query.scopes,
+      nowIso,
+      query.limit,
+      scopeByDatasetId,
+      this.config.recall.searchType === 'CHUNKS',
+    )
   }
 
   async forget(input: ForgetInput): Promise<ForgetResult> {
