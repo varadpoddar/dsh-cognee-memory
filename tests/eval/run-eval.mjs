@@ -123,12 +123,14 @@ const patches = {
   pluginOff: path.join(WORK, 'patch-plugin-off.yml'),
   other: path.join(WORK, 'patch-other-scope.yml'),
   noToolsOther: path.join(WORK, 'patch-other-scope-no-tools.yml'),
+  memoryOnly: path.join(WORK, 'patch-memory-only.yml'),
 }
 fs.writeFileSync(patches.base, patchYaml({ tools: true }), { mode: 0o644 })
 fs.writeFileSync(patches.noTools, patchYaml({ tools: false, noTools: true }), { mode: 0o644 })
 fs.writeFileSync(patches.pluginOff, patchYaml({ tools: false, enabled: false, noTools: true }), { mode: 0o644 })
 fs.writeFileSync(patches.other, patchYaml({ tools: true, projectId: OTHER_PROJECT }), { mode: 0o644 })
 fs.writeFileSync(patches.noToolsOther, patchYaml({ tools: false, projectId: OTHER_PROJECT, noTools: true }), { mode: 0o644 })
+fs.writeFileSync(patches.memoryOnly, patchYaml({ tools: true, noTools: true }), { mode: 0o644 })
 
 async function apiOnce(pathname, init = {}) {
   const response = await fetch(`${API_ORIGIN}${pathname}`, {
@@ -320,7 +322,7 @@ async function main() {
       'questions: ' + facts.map((f) => f.color).join(', ') + '\n' +
       aRows.map((row) => `${row.color}: correct=${row.correct} ms=${row.ms} toolCalls=${row.toolCalls} :: ${row.final.replace(/\s+/g, ' ')}`).join('\n') +
       `\nall-tools patch: ${patches.noTools}`,
-    commands: ['dsh --profile headless --patch patch-base.yml --json "<question>"'],
+    commands: ['dsh --profile headless --patch patch-memory-only.yml --json "<question>"'],
   })
 
   // B — same question with every memory tool disabled (prefetch injection only).
@@ -357,6 +359,7 @@ async function main() {
         ? `tools disabled; the explicit fact never became retrievable (tool_events=${cRun.toolCalls}).`
         : `tools disabled; tool_events=${cRun.toolCalls}; fact retrievable after ${cRetrievableMs} ms (records ${cBefore} → ${cAfter}).`,
     evidence: `prompt: ${cPrompt}\ntool_events: ${cRun.toolCalls}\nretrievable_ms: ${cRetrievableMs}\nfinal: ${cRun.final.replace(/\s+/g, ' ').slice(0, 400)}`,
+    commands: ['dsh --profile headless --patch patch-no-tools.yml --json "<explicit fact>"'],
   })
 
   // Duplicate rate — re-run C twice and count the records the writes added.
@@ -375,7 +378,7 @@ async function main() {
 
   // D — recall the C fact in a new process.
   const dPrompt = 'What is the maintenance window for this project? Reply with the value only.'
-  const dRun = runHeadless(dPrompt, patches.base, 180_000)
+  const dRun = runHeadless(dPrompt, patches.memoryOnly, 180_000)
   const dCorrect = dRun.final.includes(cToken)
   addScenario({
     id: 'D',
@@ -399,7 +402,7 @@ async function main() {
     serviceState = `restart-failed: ${String(error).slice(0, 120)}`
   }
   await sleep(2_000)
-  const eRun = runHeadless(dPrompt, patches.base, 180_000)
+  const eRun = runHeadless(dPrompt, patches.memoryOnly, 180_000)
   const eCorrect = eRun.final.includes(cToken)
   console.log(JSON.stringify({ step: 'E', correct: eCorrect, service: serviceState }))
   addScenario({
@@ -408,7 +411,7 @@ async function main() {
     status: serviceState === 'active' && eCorrect ? 'PASS' : 'FAIL',
     summary: `service ${serviceState}; fresh process after the restart answered ${eCorrect ? 'with' : 'without'} the stored code.`,
     evidence: `systemctl is-active: ${serviceState}\ntool_events: ${eRun.toolCalls} [${eRun.toolNames.join(', ')}]\nfinal: ${eRun.final.replace(/\s+/g, ' ').slice(0, 500)}`,
-    commands: ['systemctl restart deepseek-harness', 'dsh --profile headless --patch patch-base.yml --json "<question>"'],
+    commands: ['systemctl restart deepseek-harness', 'dsh --profile headless --patch patch-memory-only.yml --json "<question>"'],
   })
 
   // K — project + principal isolation.
