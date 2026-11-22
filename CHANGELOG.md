@@ -2,6 +2,19 @@
 
 ## 1.0.0 — 2026-11-22
 
+### Packaging
+
+- **The package now declares `dsh.bundle`** (`{"patch": "./cordis.patch.yml"}`),
+  matching the shape of the shipped experimental bundles
+  (`@deepseek-ai/dsh-experimental-ralph-bundle`). `cordis.patch.yml` inserts the
+  `cognee-memory` row, so `dsh plugin add` registers the package in
+  `dsh.profile.bundles` as a real profile layer instead of installing it as a
+  plain dependency. Deployment-local config (API base URL, scope, limits) stays
+  in the profile's own `cordis.patch.yml` as an id-targeted `config` override;
+  an `insert` block for the same id would mount the plugin twice. An existing
+  plain-dependency install is not re-registered: remove and re-add the package
+  once (`dsh plugin --profile web remove dsh-cognee-memory` then `add <tgz>`).
+
 First stable release. No DSH core patch; the plugin still mounts through one
 profile row and uses only `ctx.tools.register`, `ctx.systemPrompt.*`, agent and
 session events, and `ctx.webServer.register`.

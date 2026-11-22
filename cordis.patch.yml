@@ -1,0 +1,6 @@
+# dsh-cognee-memory — profile layer (dsh.bundle.patch).
+# Inserts the plugin entry. Deployment-local settings belong in the profile's
+# own cordis.patch.yml as an id-targeted `config` override for `cognee-memory`.
+- insert:
+    - id: cognee-memory
+      name: dsh-cognee-memory
