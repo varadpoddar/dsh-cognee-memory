@@ -60,7 +60,7 @@ describe('lastUserText', () => {
 })
 
 describe('registerAgentLifecycle', () => {
-  it('wires only the three verified agent hooks and can remove them', () => {
+  it('wires the verified agent + assembly hooks and can remove them', () => {
     const fake = createFakePluginContext()
     const dispose = registerAgentLifecycle(fake.ctx, {
       coordinator: { recallService: { safeRecall: vi.fn() } },
@@ -69,7 +69,9 @@ describe('registerAgentLifecycle', () => {
     expect(fake.listeners.map((entry) => entry.name).sort()).toEqual([
       'agent/created',
       'agent/disposed',
+      'agent/inbox/claimed',
       'agent/pre-step',
+      'system-prompt/assemble',
     ])
     dispose()
     expect(fake.listeners).toHaveLength(0)

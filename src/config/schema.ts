@@ -120,6 +120,24 @@ export const CogneeMemoryConfigSchema = z
       })
       .prefault({}),
 
+    /**
+     * First-turn retrieval budget. The prefetch starts when the agent claims
+     * the user message (`agent/inbox/claimed`, which the loop emits before
+     * `systemPrompt.assemble`), and the assembly waterfall awaits at most
+     * `timeoutMs` of the remaining budget. Stable per turn: 300 tokens,
+     * 8 items, 900-character query, 1500 ms, one bounded retry.
+     */
+    prefetch: z
+      .object({
+        enabled: z.boolean().default(true),
+        maxTokens: z.number().int().min(32).max(4_000).default(300),
+        maxItems: z.number().int().min(1).max(20).default(8),
+        maxQueryChars: z.number().int().min(1).max(20_000).default(900),
+        timeoutMs: z.number().int().min(50).max(30_000).default(1_500),
+        maxRetries: z.number().int().min(0).max(2).default(1),
+      })
+      .prefault({}),
+
     dedup: z
       .object({
         nearDuplicateThreshold: z.number().min(0.5).max(1).default(0.92),

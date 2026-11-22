@@ -12,6 +12,13 @@ export type MetricName =
   | 'redaction.blocked'
   | 'prompt.refresh'
   | 'prompt.failures'
+  | 'prefetch.begin'
+  | 'prefetch.hits'
+  | 'prefetch.empty'
+  | 'prefetch.inject'
+  | 'prefetch.timeout'
+  | 'prefetch.aborted'
+  | 'prefetch.failures'
   | 'circuit.open'
   | 'retry.attempts'
   | 'adapter.timeouts'
@@ -28,6 +35,13 @@ const METRIC_NAMES: readonly MetricName[] = [
   'redaction.blocked',
   'prompt.refresh',
   'prompt.failures',
+  'prefetch.begin',
+  'prefetch.hits',
+  'prefetch.empty',
+  'prefetch.inject',
+  'prefetch.timeout',
+  'prefetch.aborted',
+  'prefetch.failures',
   'circuit.open',
   'retry.attempts',
   'adapter.timeouts',

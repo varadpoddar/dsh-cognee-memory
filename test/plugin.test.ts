@@ -122,7 +122,9 @@ describe('plugin entry', () => {
     expect(fake.listeners.map((entry) => entry.name).sort()).toEqual([
       'agent/created',
       'agent/disposed',
+      'agent/inbox/claimed',
       'agent/pre-step',
+      'system-prompt/assemble',
     ])
     expect(typeof dispose).toBe('function')
   })

@@ -3,7 +3,13 @@ import type { RecallService } from '../memory/recall.js'
 import { identityFromAgent } from '../memory/scopes.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type { AgentLike, PluginContextLike } from '../types.js'
-import { MemoryPromptContext, sanitizeQuery } from './prompt-context.js'
+import {
+  MemoryPromptContext,
+  applyMemoryContext,
+  sanitizeQuery,
+  type AssemblyContextLike,
+  type PromptAssemblyLike,
+} from './prompt-context.js'
 
 interface AgentWithContext extends AgentLike {
   readonly ctx?: Pick<PluginContextLike, 'systemPrompt'>
@@ -23,6 +29,17 @@ interface PreStepPayload {
   readonly turn: number
   readonly step: number
   readonly signal: AbortSignal
+}
+
+/**
+ * Emitted by the loop's inbox `claim()` — synchronously, before
+ * `systemPrompt.assemble()` runs for the same step. This is the earliest point
+ * where the turn's user text is known, so the prefetch starts here.
+ */
+interface InboxClaimedPayload {
+  readonly agent: AgentWithContext
+  readonly message: unknown
+  readonly turn: number
 }
 
 type PreStepDecision = { readonly kind: 'reject' } | { readonly kind: 'enter'; readonly messages: readonly unknown[] }
@@ -58,14 +75,26 @@ export function lastUserText(messages: readonly unknown[]): string {
   return ''
 }
 
+/** True for a message the loop synthesized (runtime context), not user input. */
+function isRuntimeContext(message: unknown): boolean {
+  if (message === null || typeof message !== 'object') return false
+  const source = (message as { source?: { kind?: unknown } }).source
+  return source !== undefined && source.kind === 'runtime-context'
+}
+
 /**
- * Wire only the agent lifecycle hooks verified in DSH 0.2.1-rc.5:
- * `agent/created`, `agent/pre-step`, and `agent/disposed`.
+ * Wire the agent lifecycle hooks verified in DSH 0.2.1-rc.5:
+ * `agent/created`, `system-prompt/assemble`, `agent/inbox/claimed`,
+ * `agent/pre-step`, and `agent/disposed`.
  *
- * Prompt context is registered per agent in `agent.ctx`, so memory from one
- * live session cannot appear in another agent's prompt. The pre-step refresh is
- * fire-and-forget; assembly has already happened for this step, so the fresh
- * block is visible from the next step and never delays or rejects the turn.
+ * Ordering is the whole point. The loop runs
+ * `inbox.claim()` → `systemPrompt.assemble()` → `agent/pre-step`
+ * (dsh-agent-loop/lib/index.js:906-909), and `claim()` emits
+ * `agent/inbox/claimed` before assemble starts. The prefetch therefore begins
+ * with the claimed user message, and the async `system-prompt/assemble`
+ * waterfall — awaited before the request is built — waits inside the hard
+ * budget and substitutes the fetched block. A one-shot turn now carries turn-1
+ * memory in its first model call instead of the next step.
  */
 export function registerAgentLifecycle(
   ctx: PluginContextLike,
@@ -78,6 +107,11 @@ export function registerAgentLifecycle(
   const bindings = new Map<string, AgentBinding>()
   const disposers: Array<() => unknown> = []
   let disposed = false
+
+  const bindingFor = (agent: unknown): AgentBinding | undefined => {
+    const identity = identityFromAgent(agent as AgentLike | undefined)
+    return identity.sessionId === undefined ? undefined : bindings.get(identity.sessionId)
+  }
 
   const onCreated = (payload: AgentCreatedPayload): undefined => {
     try {
@@ -101,23 +135,55 @@ export function registerAgentLifecycle(
     return undefined
   }
 
+  /** Start the bounded prefetch for the message this step just claimed. */
+  const onClaimed = (payload: InboxClaimedPayload): undefined => {
+    try {
+      if (isRuntimeContext(payload.message)) return undefined
+      const query = sanitizeQuery(textFromMessage(payload.message))
+      if (query === '') return undefined
+      bindingFor(payload.agent)?.controller.beginPrefetch({ turn: payload.turn, query })
+    } catch {
+      deps.metrics?.increment('prefetch.failures')
+    }
+    return undefined
+  }
+
+  /**
+   * Expert waterfall over the assembled prompt (dsh-system-prompt), awaited by
+   * the loop before it builds the model request. The default assembly already
+   * resolved this plugin's context provider to its (possibly empty) cache, so
+   * the entry is rewritten with the awaited block.
+   */
+  const onAssemble = async (
+    assembly: PromptAssemblyLike,
+    context: AssemblyContextLike,
+    next: () => Promise<PromptAssemblyLike>,
+  ): Promise<PromptAssemblyLike> => {
+    const resolved = await next()
+    try {
+      const binding = bindingFor(context?.agent)
+      if (binding === undefined) return resolved
+      const block = await binding.controller.resolveForAssembly(context ?? {})
+      return block === '' ? resolved : applyMemoryContext(resolved, block)
+    } catch {
+      // Prompt assembly must never fail because memory was unavailable.
+      deps.metrics?.increment('prefetch.failures')
+      return resolved
+    }
+  }
+
   const onPreStep = async (
     payload: PreStepPayload,
     next: () => Promise<PreStepDecision>,
   ): Promise<PreStepDecision> => {
     try {
-      const identity = identityFromAgent(payload.agent)
-      const binding = identity.sessionId === undefined ? undefined : bindings.get(identity.sessionId)
-      const query = lastUserText(payload.messages)
-      if (binding !== undefined && query !== '') {
-        void binding.controller
-          .refresh({
-            query,
-            signal: payload.signal,
-          })
-          .catch(() => {
-            deps.metrics?.increment('prompt.failures')
-          })
+      const binding = bindingFor(payload.agent)
+      if (binding !== undefined) {
+        binding.controller.noteTurn(payload.turn)
+        // Fallback for hosts that never emit `agent/inbox/claimed`: the fetch
+        // started here is still deduplicated and reused by the next assembly.
+        const query = lastUserText(payload.messages)
+        if (query !== '') binding.controller.beginPrefetch({ turn: payload.turn, query })
       }
     } catch {
       deps.metrics?.increment('prompt.failures')
@@ -132,6 +198,7 @@ export function registerAgentLifecycle(
       const binding = bindings.get(identity.sessionId)
       if (binding === undefined) return
       bindings.delete(identity.sessionId)
+      binding.controller.clear()
       binding.dispose()
     } catch {
       // Disposal is best-effort; the agent scope also unwinds registrations.
@@ -139,6 +206,8 @@ export function registerAgentLifecycle(
   }
 
   disposers.push(ctx.on('agent/created', onCreated as never))
+  disposers.push(ctx.on('system-prompt/assemble', onAssemble as never))
+  disposers.push(ctx.on('agent/inbox/claimed', onClaimed as never))
   disposers.push(ctx.on('agent/pre-step', onPreStep as never))
   disposers.push(ctx.on('agent/disposed', onDisposed as never))
 
@@ -154,6 +223,7 @@ export function registerAgentLifecycle(
     }
     for (const binding of bindings.values()) {
       try {
+        binding.controller.clear()
         binding.dispose()
       } catch {
         // The agent scope owns final disposal.
