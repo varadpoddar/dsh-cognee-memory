@@ -7,13 +7,20 @@
  * base URL (query, fragment) and returns a message fit for rendering.
  */
 import { httpUrlSchema } from '../config/schema.js'
-import { SETTINGS_TOKEN_ENV } from './store.js'
 
 /** Path of the settings page (declared here to avoid a route/helper import cycle). */
 export const SETTINGS_PAGE_PATH = '/plugins/cognee-memory/settings'
 
 /** The token placeholder printed by `memory_status`; never the token value. */
 export const SETTINGS_TOKEN_PLACEHOLDER = '<COGNEE_MEMORY_SETTINGS_TOKEN>'
+
+/**
+ * Environment variable holding the operator token. Duplicated as a literal on
+ * purpose: `store.ts` imports `validateCogneeUrl` from this module, so importing
+ * the constant back would create an ESM cycle that failed at live load
+ * ("Cannot access 'SETTINGS_TOKEN_ENV' before initialization").
+ */
+const SETTINGS_TOKEN_ENV = 'COGNEE_MEMORY_SETTINGS_TOKEN'
 
 /** Where the real token lives, for the operator reading status output. */
 export const SETTINGS_TOKEN_SOURCE =
