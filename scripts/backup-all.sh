@@ -22,6 +22,7 @@ PLUGIN="$(node -p "require('$repo/package.json').version" 2>/dev/null || echo un
 echo "[backup] ts=$TS commit=$COMMIT plugin=$PLUGIN"
 
 "${SSH[@]}" "cat > /tmp/backup.sh" < "$here/backup.sh"
+"${SSH[@]}" "cat > /tmp/verify-backup.sh" < "$here/verify-backup.sh"
 "${SSH[@]}" "pct push 106 /tmp/backup.sh /root/backup.sh --perms 0755 && \
              pct push 103 /tmp/backup.sh /root/backup.sh --perms 0755"
 
@@ -33,48 +34,13 @@ echo "[backup] CT103 dsh side"
 "${SSH[@]}" "pct exec 103 -- bash /root/backup.sh --side dsh --ts '$TS' \
                --commit '$COMMIT' --plugin '$PLUGIN'" 2>&1 | tail -6
 
-echo "[backup] verifying checksums and dump listing"
-"${SSH[@]}" "pct exec 106 -- bash -c '
-  set -e
-  d=/root/backups/dsh-cognee-$TS/cognee
-  cd \$d
-  python3 - <<PY
-import hashlib
-bad = 0
-for line in open(\"SHA256SUMS\"):
-    want, rel = line.rstrip().split(\"  \", 1)
-    got = hashlib.sha256(open(rel, \"rb\").read()).hexdigest()
-    if got != want:
-        bad += 1
-        print(\"MISMATCH\", rel)
-print(\"sha256: all OK\" if bad == 0 else \"sha256: %d BAD\" % bad)
-PY
-  docker exec -i cognee-db pg_restore -l < \$d/cognee_db.dump > /tmp/pglist.txt
-  python3 - <<PY
-lines = open("/tmp/pglist.txt").read().splitlines()
-kinds = ("TABLE DATA", "TABLE", "SEQUENCE", "CONSTRAINT", "INDEX")
-objs = [l for l in lines if any(" %s " % k in l for k in kinds)]
-tdata = [l for l in lines if " TABLE DATA " in l]
-print("pg_restore -l: OK (%d objects, %d table-data entries)" % (len(objs), len(tdata)))
-PY
-  rm -f /tmp/pglist.txt
-'"
+echo "[backup] verifying both sides"
+"${SSH[@]}" "pct push 106 /tmp/verify-backup.sh /root/verify-backup.sh --perms 0700 \
+             && pct push 103 /tmp/verify-backup.sh /root/verify-backup.sh --perms 0700"
+"${SSH[@]}" "pct exec 106 -- bash /root/verify-backup.sh --side cognee --ts '$TS'" 2>&1 | tail -10
+"${SSH[@]}" "pct exec 103 -- bash /root/verify-backup.sh --side dsh --ts '$TS'" 2>&1 | tail -10
 
-"${SSH[@]}" "pct exec 103 -- bash -c '
-  cd /root/backups/dsh-cognee-$TS/dsh
-  python3 - <<PY
-import hashlib
-bad = 0
-for line in open(\"SHA256SUMS\"):
-    want, rel = line.rstrip().split(\"  \", 1)
-    got = hashlib.sha256(open(rel, \"rb\").read()).hexdigest()
-    if got != want:
-        bad += 1
-        print(\"MISMATCH\", rel)
-print(\"sha256: all OK\" if bad == 0 else \"sha256: %d BAD\" % bad)
-PY
-  systemctl show -p SubState deepseek-harness.service
-'"
-
+echo "[backup] post-run health"
 "${SSH[@]}" "pct exec 106 -- docker ps --format '{{.Names}} {{.Status}}'"
+"${SSH[@]}" "pct exec 103 -- systemctl show -p SubState deepseek-harness.service"
 echo "[backup] manifest: /root/backups/dsh-cognee-$TS/{cognee,dsh}/MANIFEST.json"

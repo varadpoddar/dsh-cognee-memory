@@ -98,10 +98,16 @@ side_cognee() {
   say "pausing cognee, cognee-ui (writes quiesced)"
   docker pause cognee cognee-ui >/dev/null
 
-  say "pg_dump -Fc $DB_NAME -> cognee_db.dump"
+  # pg_dumpall, not pg_dump: Cognee keeps ONE POSTGRES DATABASE PER DATASET
+  # (named by dataset uuid) for the search/vector path, in addition to
+  # `cognee_db`. Dumping only cognee_db restores the metadata but every
+  # CHUNKS search then fails with `database "<uuid>" does not exist`.
+  say "pg_dumpall -> cognee_db-all.sql.gz (all databases + roles)"
   docker exec -e PGPASSWORD="$DB_PASSWORD" cognee-db \
-    pg_dump -U "$DB_USERNAME" -Fc "$DB_NAME" > "$dest/cognee_db.dump" \
-    || die "pg_dump failed"
+    pg_dumpall -U "$DB_USERNAME" 2>"$dest/pg_dumpall.err" \
+    | gzip -6 > "$dest/cognee_db-all.sql.gz"
+  if [ "${PIPESTATUS[0]}" != 0 ]; then tail -3 "$dest/pg_dumpall.err" >&2; die "pg_dumpall failed"; fi
+  rm -f "$dest/pg_dumpall.err"
 
   say "copying storage dir (ladybug graph + file storage)"
   tar -czf "$dest/cognee-storage.tar.gz" -C "$stack/data" cognee \
@@ -148,9 +154,13 @@ PY
   fi
   [ -n "$version" ] || version="unknown"
 
+  local dblist dbcount
+  dbcount=$(psql_q "select count(*) from pg_database where datistemplate=false") || dbcount=0
+  dblist=$(psql_q "select datname from pg_database where datistemplate=false order by 1" | paste -sd, -)
+
   ended=$(date -u +%s)
   local dump_bytes storage_bytes
-  dump_bytes=$(stat -c %s "$dest/cognee_db.dump")
+  dump_bytes=$(stat -c %s "$dest/cognee_db-all.sql.gz")
   storage_bytes=$(stat -c %s "$dest/cognee-storage.tar.gz")
   local nfiles
   nfiles=$(checksum_tree "$dest" | cut -d" " -f1)
@@ -165,7 +175,7 @@ PY
   "cogneeVersion": "$version",
   "host": "CT106",
   "durationSeconds": $((ended - started)),
-  "quiesce": "docker pause cognee cognee-ui around pg_dump + storage tar; auto-unpause on exit",
+  "quiesce": "docker pause cognee cognee-ui around pg_dumpall + storage tar; auto-unpause on exit",
   "counts": {
     "datasets": $datasets,
     "dataItems": $items,
@@ -173,8 +183,9 @@ PY
     "source": "postgres SQL (exact; includes datasets not visible to the DSH API key)"
   },
   "tableRowCounts": "$tables",
+  "databases": { "count": $dbcount, "names": "$dblist", "note": "one database per dataset for the search path" },
   "files": {
-    "cognee_db.dump": { "bytes": $dump_bytes, "format": "pg_dump -Fc" },
+    "cognee_db-all.sql.gz": { "bytes": $dump_bytes, "format": "pg_dumpall | gzip -6", "contains": "cognee_db + one database per dataset + roles" },
     "cognee-storage.tar.gz": { "bytes": $storage_bytes, "contains": "data/cognee: ladybug graph, system/databases, local file storage" },
     "cognee.env": { "bytes": $(stat -c %s "$dest/cognee.env"), "note": "secrets; mode 0600" },
     "compose.yaml": { "bytes": $(stat -c %s "$dest/compose.yaml") }
