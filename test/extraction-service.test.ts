@@ -443,7 +443,11 @@ describe('ExtractionService deferred LLM pass', () => {
     const started = Date.now()
     await expect(h.service.settle('session-b', 50)).resolves.toBe(false)
     expect(Date.now() - started).toBeLessThan(500)
-    expect(metrics.snapshot().counters['extraction.llm.settleTimeouts']).toBe(1)
+    // The turn-stopping fallback must share the same budget: no second wait.
+    const second = Date.now()
+    await expect(h.service.settle('session-b', 50)).resolves.toBe(false)
+    expect(Date.now() - second).toBeLessThan(20)
+    expect(metrics.snapshot().counters['extraction.llm.settleTimeouts']).toBe(2)
     release()
     await new Promise((resolve) => setTimeout(resolve, 20))
   })

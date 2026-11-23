@@ -90,6 +90,18 @@ export class ExtractionService {
   private readonly previous = new Map<string, MemoryCandidate[]>()
   /** Bounded, per-session background LLM passes awaited after the response. */
   private readonly llmTasks = new Map<string, Promise<void>>()
+  /** One settle budget per turn, shared by the stream hook and the fallback. */
+  private readonly settleDeadlines = new Map<string, number>()
+  /** Deferred passes staged by `handleTurn`; started only by `settle()` (post-response). */
+  private readonly stagedLlm = new Map<
+    string,
+    {
+      readonly inputs: readonly ExtractionInput[]
+      readonly resolved: CallerIdentity
+      readonly scopeName: Exclude<MemoryScope, 'session' | 'global'>
+      readonly scopeKeyValue: string
+    }
+  >()
 
   constructor(options: ExtractionServiceOptions) {
     this.coordinator = options.coordinator
@@ -284,7 +296,7 @@ export class ExtractionService {
         this.lastCandidates = candidates.slice(-8)
         if (llmInputs.length > 0) {
           if (options.llm === 'defer') {
-            this.scheduleLlmPass(input.sessionId, llmInputs, resolved, scopeName, scopeKeyValue)
+            this.stageLlmPass(input.sessionId, llmInputs, resolved, scopeName, scopeKeyValue)
             deferred = true
           } else {
             const produced = await this.llmPass(llmInputs)
@@ -340,10 +352,12 @@ export class ExtractionService {
   }
 
   /**
-   * Track a background LLM pass for a session. Per-session tasks chain, so two
-   * turns cannot interleave queue writes; failures are counted, never thrown.
+   * Stage the LLM pass without starting it. The session hooks call `settle()`
+   * only after the assistant response is streamed, so the extractor never
+   * competes with the turn's own model request (the live Studio endpoint serves
+   * one generation at a time; concurrent scheduling doubled turn latency).
    */
-  private scheduleLlmPass(
+  private stageLlmPass(
     sessionId: string,
     inputs: readonly ExtractionInput[],
     resolved: CallerIdentity,
@@ -351,21 +365,32 @@ export class ExtractionService {
     scopeKeyValue: string,
   ): void {
     this.metrics?.increment('extraction.llm.deferred')
-    const previous = this.llmTasks.get(sessionId) ?? Promise.resolve()
-    const task = previous
+    this.stagedLlm.set(sessionId, { inputs, resolved, scopeName, scopeKeyValue })
+  }
+
+  /** Start a staged pass (idempotent per session) behind a per-session chain. */
+  private startStagedPass(sessionId: string): void {
+    if (this.llmTasks.has(sessionId)) return
+    const staged = this.stagedLlm.get(sessionId)
+    if (staged === undefined) return
+    this.stagedLlm.delete(sessionId)
+    const task = Promise.resolve()
       .then(async () => {
-        const produced = await this.llmPass(inputs)
+        const produced = await this.llmPass(staged.inputs)
         if (produced.length > 0) {
-          this.rememberPrevious(scopeKeyValue, produced)
+          this.rememberPrevious(staged.scopeKeyValue, produced)
           this.lastCandidates = [...this.lastCandidates, ...produced].slice(-8)
         }
-        await this.drainQueue(resolved, scopeName)
+        await this.drainQueue(staged.resolved, staged.scopeName)
       })
       .catch(() => {
         this.metrics?.increment('extraction.llm.failures')
       })
       .finally(() => {
-        if (this.llmTasks.get(sessionId) === task) this.llmTasks.delete(sessionId)
+        if (this.llmTasks.get(sessionId) === task) {
+          this.llmTasks.delete(sessionId)
+          this.settleDeadlines.delete(sessionId)
+        }
       })
     this.llmTasks.set(sessionId, task)
   }
@@ -377,9 +402,19 @@ export class ExtractionService {
    * can add no more than the configured `settleMs` to a turn.
    */
   async settle(sessionId: string, timeoutMs?: number): Promise<boolean> {
+    this.startStagedPass(sessionId)
     const task = this.llmTasks.get(sessionId)
-    if (task === undefined) return true
+    if (task === undefined) {
+      this.settleDeadlines.delete(sessionId)
+      return true
+    }
+    const now = Date.now()
     const budget = timeoutMs ?? this.config.extraction.llm.settleMs
+    // Stream-end and turn-stopping both call settle for the same turn; share one
+    // budget so the two hooks cannot each add their own wait.
+    const deadline = this.settleDeadlines.get(sessionId) ?? now + budget
+    this.settleDeadlines.set(sessionId, deadline)
+    const remaining = Math.max(0, deadline - now)
     let timer: ReturnType<typeof setTimeout> | undefined
     const completed = await Promise.race([
       task.then(
@@ -387,12 +422,13 @@ export class ExtractionService {
         () => true,
       ),
       new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), budget)
+        timer = setTimeout(() => resolve(false), remaining)
         ;(timer as { unref?: () => void }).unref?.()
       }),
     ])
     if (timer !== undefined) clearTimeout(timer)
     this.metrics?.increment(completed ? 'extraction.llm.settled' : 'extraction.llm.settleTimeouts')
+    if (completed) this.settleDeadlines.delete(sessionId)
     return completed
   }
 
