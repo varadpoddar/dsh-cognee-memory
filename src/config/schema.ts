@@ -171,10 +171,12 @@ export const CogneeMemoryConfigSchema = z
             maxCandidates: z.number().int().min(1).max(10).default(3),
             /**
              * Hard cap on the post-response settle wait (after the assistant
-             * response, before the turn boundary), so a slow extractor cannot
-             * add more than this to a turn.
+             * response, before the turn boundary). The local extractor takes
+             * ~3.3 s, so this is deliberately short: the pass keeps running in
+             * the background (and a one-shot headless process still waits for
+             * it), while a turn adds at most this much.
              */
-            settleMs: z.number().int().min(50).max(30_000).default(4_000),
+            settleMs: z.number().int().min(50).max(30_000).default(1_000),
           })
           .prefault({}),
         queue: z
