@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.0.1 — 2026-11-23
+
+Backup, restore and packaging hardening. No change to the plugin's runtime
+behaviour, tool surface, settings page or wire contract — this release adds the
+operational tooling around the plugin and the tests that pin its on-disk
+invariants. Existing installs need no migration.
+
+### Backup and restore
+
+- **`scripts/backup.sh` / `scripts/backup-all.sh`** — application-consistent
+  backup of both halves of the memory stack. Writes are quiesced with
+  `docker pause` (auto-unpaused from an `EXIT` trap, so a failed dump never
+  leaves the API down) and the relational dump plus the embedded ladybug graph
+  are taken from the same instant. Each side writes
+  `/root/backups/dsh-cognee-<ts>/` with `SHA256SUMS` and a versioned
+  `MANIFEST.json` (commit sha, plugin and Cognee versions, exact SQL counts and
+  per-table row counts).
+- **`pg_dumpall`, not `pg_dump`.** Cognee keeps one postgres database per
+  dataset for the search path. Dumping only `cognee_db` restores every dataset
+  row and the whole graph, but every `CHUNKS` search then fails with
+  `database "<dataset-uuid>" does not exist`. A restore drill caught this;
+  `docs/BACKUP.md` explains it.
+- **`scripts/restore-drill.sh`** — restores a backup into an isolated stack
+  (own compose project, own data dir, port 18001) and asserts it: 21/21
+  databases, 20 datasets, 54 items, 4 users, 2 API keys, all six health
+  components, and one known record retrieved through `CHUNKS`.
+  Empty machine to serving copy: **38 s**.
+- **`scripts/verify-backup.sh`** — checksums, gzip integrity, dump contents and
+  manifest sanity for one side of one backup.
+- **`docs/BACKUP.md`**, **`docs/RESTORE.md`** — what is backed up and why, the
+  consistency order, the exact restore and rollback commands, measured timings,
+  and the gotchas (per-dataset databases; a cluster restore needs a superuser;
+  the graph lives in storage plus its WAL, not in postgres).
+
+### Permissions
+
+- **`scripts/check-permissions.sh`** — asserts `/etc/dsh/*.env` is
+  `0640 root:dsh`, that `$DSH_HOME` and its profiles/sessions/ledger are owned
+  by `dsh`, and that no root-owned file exists under `$DSH_HOME`. Run against
+  the live host, it immediately found `profiles/headless/cordis.patch.yml`
+  owned by `root:root` at `0644`.
+- **`test/permissions.test.ts`** (+ `test/helpers/permissions.ts`) — the same
+  invariants as root-free unit tests over injected `stat` data, including a
+  root-owned profile manifest failing loudly with the path, the diagnosis and
+  the fix in the message.
+
+### Documentation
+
+- Internal hosts removed from `README.md` (`10.20.10.15` → `cognee.internal`,
+  `10.20.10.30` → `llm-host`). No key, token, password or JWT material appears
+  in any shipped document.
+
+
 ## 1.0.0 — 2026-11-22
 
 First stable release. No DSH core patch; the plugin still mounts through one
