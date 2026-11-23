@@ -232,4 +232,69 @@ describe('private endpoint policy and optional LLM', () => {
       }),
     ).resolves.toEqual([])
   })
+  it('sends the local Studio key as a bearer token and never echoes it', async () => {
+    let headers: Record<string, string> | undefined
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      headers = init.headers as Record<string, string>
+      return {
+        ok: true,
+        async json() {
+          return {
+            choices: [
+              {
+                message: {
+                  content:
+                    '[{"key":"release-codename","fact":"the release codename is blue-heron-4412"}]',
+                },
+              },
+            ],
+          }
+        },
+      }
+    })
+    const [candidate] = await extractWithLlm(input('Our codename changed this morning.'), {
+      enabled: true,
+      endpoint: 'http://10.20.10.40:8888/v1',
+      model: 'local',
+      apiKey: 'sk-local-secret',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })
+    expect(headers?.authorization).toBe('Bearer sk-local-secret')
+    expect(JSON.stringify(candidate)).not.toContain('sk-local-secret')
+  })
+
+  it('resolves the key from the configured environment variable', async () => {
+    process.env.COGNEE_TEST_LLM_KEY = 'sk-from-env'
+    try {
+      let headers: Record<string, string> | undefined
+      const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+        headers = init.headers as Record<string, string>
+        return { ok: true, async json() { return { choices: [{ message: { content: '[]' } }] } } }
+      })
+      await extractWithLlm(input('Our codename changed this morning.'), {
+        enabled: true,
+        endpoint: 'http://10.20.10.40:8888/v1',
+        model: 'local',
+        apiKeyEnv: 'COGNEE_TEST_LLM_KEY',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+      expect(headers?.authorization).toBe('Bearer sk-from-env')
+    } finally {
+      delete process.env.COGNEE_TEST_LLM_KEY
+    }
+  })
+
+  it('still refuses a non-RFC1918 endpoint when a key is configured', async () => {
+    const fetchImpl = vi.fn()
+    await expect(
+      extractWithLlm(input('The codename is blue-heron-4412.'), {
+        enabled: true,
+        endpoint: 'https://8.8.8.8/v1',
+        model: 'remote',
+        apiKey: 'sk-local-secret',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'CONFIG' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
 })

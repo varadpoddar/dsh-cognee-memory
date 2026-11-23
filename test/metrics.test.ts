@@ -30,6 +30,7 @@ describe('Metrics', () => {
         'recall.latencyMs': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
         'prefetch.latencyMs': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
         'context.usage': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
+        'extraction.llm.latencyMs': { count: 0, p50: 0, p95: 0, max: 0, last: 0 },
       },
     })
   })

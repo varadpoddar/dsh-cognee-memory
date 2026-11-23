@@ -11,6 +11,9 @@ function harness() {
       async handleTurn(input) {
         turns.push(input)
       },
+      async settle() {
+        return true
+      },
     },
   })
   const emit = (name: string, ...args: unknown[]): void => {
@@ -168,5 +171,90 @@ describe('committed session extraction hook', () => {
     const h = harness()
     h.dispose()
     expect(h.fake.listeners).toEqual([])
+  })
+})
+describe('deferred LLM extraction ordering', () => {
+  function deferredHarness() {
+    const fake = createFakePluginContext()
+    let settleCalls = 0
+    let release!: () => void
+    const gate = new Promise<boolean>((resolve) => {
+      release = () => resolve(true)
+    })
+    const turns: ExtractionTurnInput[] = []
+    registerSessionExtraction(fake.ctx, {
+      extraction: {
+        async handleTurn(input) {
+          turns.push(input)
+        },
+        async settle() {
+          settleCalls += 1
+          return gate
+        },
+      },
+    })
+    const emit = (name: string, ...args: unknown[]): void => {
+      for (const entry of fake.listeners) {
+        if (entry.name === name) entry.listener(...(args as never[]))
+      }
+    }
+    const emitAsync = async (name: string, ...args: unknown[]): Promise<void> => {
+      for (const entry of fake.listeners) {
+        if (entry.name === name) await (entry.listener(...(args as never[])) as Promise<void>)
+      }
+    }
+    const stream = (): AsyncIterable<unknown> => {
+      const entry = fake.listeners.find((item) => item.name === 'llm/stream')
+      return (entry?.listener as unknown as (
+        options: { sessionId: string },
+        next: () => Generator<string>,
+      ) => AsyncIterable<unknown>)({ sessionId: 'session-a' }, function* () {
+        yield 'chunk'
+      })
+    }
+    return {
+      emit,
+      emitAsync,
+      stream,
+      turns,
+      get settleCalls() {
+        return settleCalls
+      },
+      release,
+    }
+  }
+
+  it('yields the first chunk before the deferred settle resolves', async () => {
+    const h = deferredHarness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 1 })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      turn: 1,
+      message: userMessage('Our staging deploys go out on Thursdays.'),
+    })
+    const iterator = h.stream()[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(first).toMatchObject({ value: 'chunk', done: false })
+    expect(h.turns).toHaveLength(1)
+    // The generator is still open: settle has not been awaited yet.
+    expect(h.settleCalls).toBe(0)
+    h.release()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    expect(h.settleCalls).toBe(1)
+  })
+
+  it('settles on the turn-stopping fallback when no model stream happened', async () => {
+    const h = deferredHarness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 2 })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      turn: 2,
+      message: userMessage('Our staging deploys go out on Thursdays.'),
+    })
+    // No llm/stream: the serial fallback extracts (deferred) and settles.
+    h.release()
+    await h.emitAsync('agent/turn-stopping', { agent: session, turn: 2 })
+    expect(h.turns).toHaveLength(1)
+    expect(h.settleCalls).toBe(1)
   })
 })

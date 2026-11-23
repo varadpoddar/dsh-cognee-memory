@@ -10,6 +10,7 @@ import { Outbox, type OutboxStatus } from './outbox.js'
 import {
   extractDeterministicCandidates,
   extractWithLlm,
+  type ExtractionInput,
   type MemoryCandidate,
 } from './extraction.js'
 import type { MemoryCoordinator } from './coordinator.js'
@@ -83,15 +84,19 @@ export class ExtractionService {
   private readonly queue: CandidateQueue
   private readonly outbox: Outbox
   private readonly fetchImpl: typeof fetch | undefined
+  private readonly env: NodeJS.ProcessEnv
   private lastCandidates: readonly MemoryCandidate[] = []
   private lastError: string | undefined
   private readonly previous = new Map<string, MemoryCandidate[]>()
+  /** Bounded, per-session background LLM passes awaited after the response. */
+  private readonly llmTasks = new Map<string, Promise<void>>()
 
   constructor(options: ExtractionServiceOptions) {
     this.coordinator = options.coordinator
     this.config = options.config
     this.metrics = options.metrics
     const env = options.env ?? process.env
+    this.env = env
     this.queue =
       options.queue ??
       new CandidateQueue({
@@ -212,7 +217,19 @@ export class ExtractionService {
     this.previous.set(scopeKey, [...existing, ...candidates].slice(-12))
   }
 
-  async handleTurn(input: ExtractionTurnInput): Promise<void> {
+  /**
+   * Extract one committed user turn.
+   *
+   * `llm: 'inline'` (the default, and what tests use) runs the deterministic
+   * pass, the LLM pass and ingestion in one await. `llm: 'defer'` runs only the
+   * fast deterministic pass inline, then schedules the LLM pass as a tracked
+   * background task; the model stream calls `settle()` after the response so a
+   * slow local model never delays the first token.
+   */
+  async handleTurn(
+    input: ExtractionTurnInput,
+    options: { readonly llm?: 'inline' | 'defer' } = {},
+  ): Promise<void> {
     if (!this.config.extraction.enabled) return
     try {
       const identity: CallerIdentity = {
@@ -230,14 +247,16 @@ export class ExtractionService {
         this.lastError = `no ${scopeName} scope for extraction`
         return
       }
+      let deferred = false
       // `autoWrite: false` stops NEW extraction but never loses accepted work:
       // the queue and outbox are still recovered and drained below.
       if (this.config.autoWrite && input.messages.length > 0) {
         const scopeKeyValue = `${scope.scope}:${scope.id}`
         const previous = this.previous.get(scopeKeyValue) ?? []
         const candidates: MemoryCandidate[] = []
+        const llmInputs: ExtractionInput[] = []
         for (const message of input.messages) {
-          const sourceInput = {
+          const sourceInput: ExtractionInput = {
             text: message.text,
             identity: resolved,
             scope,
@@ -246,22 +265,11 @@ export class ExtractionService {
             ...(message.seq === undefined ? {} : { seq: message.seq }),
             previous: [...previous, ...candidates],
           }
-          let produced = this.config.extraction.deterministic
+          const produced = this.config.extraction.deterministic
             ? extractDeterministicCandidates(sourceInput)
             : []
           if (produced.length === 0 && this.config.extraction.llm.enabled) {
-            this.metrics?.increment('extraction.llm.requests')
-            produced = await extractWithLlm(sourceInput, {
-              enabled: true,
-              endpoint: this.config.extraction.llm.endpoint,
-              model: this.config.extraction.llm.model,
-              timeoutMs: this.config.extraction.llm.timeoutMs,
-              maxCandidates: this.config.extraction.llm.maxCandidates,
-              ...(this.fetchImpl === undefined ? {} : { fetchImpl: this.fetchImpl }),
-            }).catch(() => {
-              this.metrics?.increment('extraction.llm.failures')
-              return [] as MemoryCandidate[]
-            })
+            llmInputs.push(sourceInput)
           }
           for (const candidate of produced) {
             this.metrics?.increment('extraction.candidates')
@@ -274,13 +282,118 @@ export class ExtractionService {
         }
         this.rememberPrevious(scopeKeyValue, candidates)
         this.lastCandidates = candidates.slice(-8)
+        if (llmInputs.length > 0) {
+          if (options.llm === 'defer') {
+            this.scheduleLlmPass(input.sessionId, llmInputs, resolved, scopeName, scopeKeyValue)
+            deferred = true
+          } else {
+            const produced = await this.llmPass(llmInputs)
+            this.rememberPrevious(scopeKeyValue, produced)
+            this.lastCandidates = [...candidates, ...produced].slice(-8)
+          }
+        }
       }
-      await this.drainQueue(resolved, scopeName)
+      if (!deferred) await this.drainQueue(resolved, scopeName)
       this.lastError = undefined
     } catch (error) {
       this.metrics?.increment('extraction.failed')
       this.lastError = isMemoryError(error) ? error.code : 'EXTRACTION_FAILED'
     }
+  }
+
+  /**
+   * Run the LLM pass and queue its candidates (no drain). Returns the accepted
+   * candidates so `lastCandidates`/`previous` stay accurate.
+   */
+  private async llmPass(inputs: readonly ExtractionInput[]): Promise<MemoryCandidate[]> {
+    const accepted: MemoryCandidate[] = []
+    for (const sourceInput of inputs) {
+      this.metrics?.increment('extraction.llm.requests')
+      const started = Date.now()
+      let produced: MemoryCandidate[] = []
+      try {
+        produced = await extractWithLlm(sourceInput, {
+          enabled: true,
+          endpoint: this.config.extraction.llm.endpoint,
+          model: this.config.extraction.llm.model,
+          apiKeyEnv: this.config.extraction.llm.apiKeyEnv,
+          timeoutMs: this.config.extraction.llm.timeoutMs,
+          maxCandidates: this.config.extraction.llm.maxCandidates,
+          ...(this.fetchImpl === undefined ? {} : { fetchImpl: this.fetchImpl }),
+        })
+      } catch {
+        this.metrics?.increment('extraction.llm.failures')
+        continue
+      } finally {
+        this.metrics?.observe('extraction.llm.latencyMs', Date.now() - started)
+      }
+      for (const candidate of produced) {
+        this.metrics?.increment('extraction.candidates')
+        const result = await this.queue.enqueue(candidate)
+        if (result.accepted) {
+          this.metrics?.increment('extraction.queued')
+          accepted.push(candidate)
+        }
+      }
+    }
+    return accepted
+  }
+
+  /**
+   * Track a background LLM pass for a session. Per-session tasks chain, so two
+   * turns cannot interleave queue writes; failures are counted, never thrown.
+   */
+  private scheduleLlmPass(
+    sessionId: string,
+    inputs: readonly ExtractionInput[],
+    resolved: CallerIdentity,
+    scopeName: Exclude<MemoryScope, 'session' | 'global'>,
+    scopeKeyValue: string,
+  ): void {
+    this.metrics?.increment('extraction.llm.deferred')
+    const previous = this.llmTasks.get(sessionId) ?? Promise.resolve()
+    const task = previous
+      .then(async () => {
+        const produced = await this.llmPass(inputs)
+        if (produced.length > 0) {
+          this.rememberPrevious(scopeKeyValue, produced)
+          this.lastCandidates = [...this.lastCandidates, ...produced].slice(-8)
+        }
+        await this.drainQueue(resolved, scopeName)
+      })
+      .catch(() => {
+        this.metrics?.increment('extraction.llm.failures')
+      })
+      .finally(() => {
+        if (this.llmTasks.get(sessionId) === task) this.llmTasks.delete(sessionId)
+      })
+    this.llmTasks.set(sessionId, task)
+  }
+
+  /**
+   * Await the session's background LLM pass for at most `timeoutMs`. Called
+   * after the assistant response is streamed (and before the turn boundary) so
+   * a one-shot headless process still completes ingestion, while a slow model
+   * can add no more than the configured `settleMs` to a turn.
+   */
+  async settle(sessionId: string, timeoutMs?: number): Promise<boolean> {
+    const task = this.llmTasks.get(sessionId)
+    if (task === undefined) return true
+    const budget = timeoutMs ?? this.config.extraction.llm.settleMs
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const completed = await Promise.race([
+      task.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), budget)
+        ;(timer as { unref?: () => void }).unref?.()
+      }),
+    ])
+    if (timer !== undefined) clearTimeout(timer)
+    this.metrics?.increment(completed ? 'extraction.llm.settled' : 'extraction.llm.settleTimeouts')
+    return completed
   }
 
   async status(): Promise<ExtractionSnapshot> {

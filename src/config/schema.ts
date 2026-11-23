@@ -162,7 +162,7 @@ export const CogneeMemoryConfigSchema = z
         scope: z.enum(['agent', 'user', 'project', 'team']).default('project'),
         llm: z
           .object({
-            enabled: z.boolean().default(false),
+            enabled: z.boolean().default(true),
             endpoint: httpUrl.default('http://10.20.10.40:8888/v1'),
             model: nonEmpty.default('unsloth/Qwen3.8-27B-GGUF'),
             /** Environment variable holding the Studio key; never the key itself. */

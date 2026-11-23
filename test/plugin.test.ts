@@ -172,7 +172,10 @@ describe('plugin entry', () => {
     expect(config.scopes.defaultWriteScope).toBe('project')
     expect(config.extraction.enabled).toBe(true)
     expect(config.extraction.deterministic).toBe(true)
-    expect(config.extraction.llm.enabled).toBe(false)
+    // Implicit facts are the common case, so the local-model pass ships on.
+    expect(config.extraction.llm.enabled).toBe(true)
+    expect(config.extraction.llm.endpoint).toBe('http://10.20.10.40:8888/v1')
+    expect(config.extraction.llm.apiKeyEnv).toBe('UNSLOTH_LARGE_API_KEY')
   })
 
   it('declares only the JSON Schema subset accepted by DSH 0.2.1-rc.5', () => {

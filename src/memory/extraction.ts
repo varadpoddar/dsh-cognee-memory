@@ -238,11 +238,28 @@ export interface LlmExtractionOptions {
   readonly enabled: boolean
   readonly endpoint: string
   readonly model: string
+  /** Explicit key, or resolve it from `apiKeyEnv` (never both required). */
+  readonly apiKey?: string
+  /** Environment variable holding the local Studio key; never the key itself. */
+  readonly apiKeyEnv?: string
   readonly timeoutMs?: number
   readonly maxTokens?: number
   readonly maxCandidates?: number
   readonly fetchImpl?: typeof fetch
   readonly now?: Date
+}
+
+/**
+ * The local Studio key, resolved at call time and never stored in config or
+ * returned. An absent key simply omits the header (the endpoint decides whether
+ * that is an error); it is never logged or placed in an error message.
+ */
+function resolveApiKey(options: LlmExtractionOptions): string {
+  const direct = options.apiKey?.trim()
+  if (direct !== undefined && direct !== '') return direct
+  const envName = options.apiKeyEnv?.trim()
+  const fromEnv = envName === undefined || envName === '' ? undefined : process.env[envName]?.trim()
+  return fromEnv ?? ''
 }
 
 interface LlmCandidate {
@@ -277,9 +294,13 @@ export async function extractWithLlm(
   ;(timer as { unref?: () => void }).unref?.()
   try {
     const endpoint = options.endpoint.replace(/\/+$/, '')
+    const apiKey = resolveApiKey(options)
     const response = await fetchImpl(`${endpoint}/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey === '' ? {} : { authorization: `Bearer ${apiKey}` }),
+      },
       signal: controller.signal,
       body: JSON.stringify({
         model: options.model,

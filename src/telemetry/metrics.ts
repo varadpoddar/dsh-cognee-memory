@@ -19,6 +19,9 @@ export type MetricName =
   | 'extraction.failed'
   | 'extraction.llm.requests'
   | 'extraction.llm.failures'
+  | 'extraction.llm.deferred'
+  | 'extraction.llm.settled'
+  | 'extraction.llm.settleTimeouts'
   | 'cognee.service.degraded'
   | 'cognee.service.conflict'
   | 'forget.requests'
@@ -70,6 +73,9 @@ const METRIC_NAMES: readonly MetricName[] = [
   'extraction.failed',
   'extraction.llm.requests',
   'extraction.llm.failures',
+  'extraction.llm.deferred',
+  'extraction.llm.settled',
+  'extraction.llm.settleTimeouts',
   'cognee.service.degraded',
   'cognee.service.conflict',
   'forget.requests',
@@ -108,12 +114,17 @@ const METRIC_NAMES: readonly MetricName[] = [
  * reports p50/p95 from these; nothing is exported off-process and no sample
  * ever contains memory text.
  */
-export type SampleName = 'recall.latencyMs' | 'prefetch.latencyMs' | 'context.usage'
+export type SampleName =
+  | 'recall.latencyMs'
+  | 'prefetch.latencyMs'
+  | 'context.usage'
+  | 'extraction.llm.latencyMs'
 
 export const SAMPLE_NAMES: readonly SampleName[] = [
   'recall.latencyMs',
   'prefetch.latencyMs',
   'context.usage',
+  'extraction.llm.latencyMs',
 ]
 
 const SAMPLE_CAPACITY = 256

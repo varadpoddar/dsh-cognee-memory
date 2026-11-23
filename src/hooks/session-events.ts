@@ -73,7 +73,7 @@ function sessionIdOf(session: SessionLike): string | undefined {
 export function registerSessionExtraction(
   ctx: PluginContextLike,
   deps: {
-    readonly extraction: Pick<ExtractionService, 'handleTurn'>
+    readonly extraction: Pick<ExtractionService, 'handleTurn' | 'settle'>
     readonly metrics?: Metrics
   },
 ): () => void {
@@ -148,28 +148,48 @@ export function registerSessionExtraction(
     return (async function* streamAfterExtraction() {
       deps.metrics?.increment('extraction.streams')
       const sessionId = typeof options.sessionId === 'string' ? options.sessionId : undefined
+      let drained = false
       if (sessionId !== undefined) {
         const bucket = buckets.get(sessionId)
         const session = sessions.get(sessionId)
+        const streamPreset = session?.header?.agentPreset
         if (bucket !== undefined && bucket.messages.length > 0) {
           deps.metrics?.increment('extraction.streamsWithBucket')
           buckets.delete(sessionId)
+          drained = true
+          // Fast path only: deterministic commands are queued/ingested before
+          // the first token; the LLM pass is deferred behind the response.
           try {
-            await deps.extraction.handleTurn({
-              sessionId,
-              turn: bucket.turn,
-              messages: bucket.messages,
-              ...(typeof session?.header?.agentPreset === 'string' &&
-              session.header.agentPreset !== ''
-                ? { agentPreset: session.header.agentPreset }
-                : {}),
-            })
+            await deps.extraction.handleTurn(
+              {
+                sessionId,
+                turn: bucket.turn,
+                messages: bucket.messages,
+                ...(typeof streamPreset === 'string' && streamPreset !== ''
+                  ? { agentPreset: streamPreset }
+                  : {}),
+              },
+              { llm: 'defer' },
+            )
           } catch {
             deps.metrics?.increment('extraction.failed')
           }
         }
       }
-      yield* next()
+      try {
+        yield* next()
+      } finally {
+        // After the response is streamed (never before the first token): bound
+        // the wait so a slow local extractor cannot delay the turn. This is
+        // also what guarantees a one-shot headless run ingests its candidate.
+        if (sessionId !== undefined && drained) {
+          try {
+            await deps.extraction.settle(sessionId)
+          } catch {
+            deps.metrics?.increment('extraction.failed')
+          }
+        }
+      }
     })()
   }
 
@@ -184,16 +204,23 @@ export function registerSessionExtraction(
     const sessionId = sessionIdOf(session)
     if (sessionId === undefined) return
     const bucket = buckets.get(sessionId)
-    if (bucket === undefined || bucket.messages.length === 0) return
-    buckets.delete(sessionId)
     const preset = session.header?.agentPreset
     try {
-      await deps.extraction.handleTurn({
-        sessionId,
-        turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
-        messages: bucket.messages,
-        ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
-      })
+      // Runs after the response is produced, so deferring the LLM here costs
+      // no first-token latency; `settle` then bounds the boundary wait.
+      if (bucket !== undefined && bucket.messages.length > 0) {
+        buckets.delete(sessionId)
+        await deps.extraction.handleTurn(
+          {
+            sessionId,
+            turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
+            messages: bucket.messages,
+            ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
+          },
+          { llm: 'defer' },
+        )
+      }
+      await deps.extraction.settle(sessionId)
     } catch {
       deps.metrics?.increment('extraction.failed')
     }

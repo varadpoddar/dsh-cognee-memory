@@ -7,6 +7,7 @@ import { MemoryError } from '../src/errors.js'
 import { CandidateQueue } from '../src/memory/candidate-queue.js'
 import { ExtractionService } from '../src/memory/extraction-service.js'
 import { Outbox } from '../src/memory/outbox.js'
+import { Metrics } from '../src/telemetry/metrics.js'
 import type { CallerIdentity, RememberResult } from '../src/types.js'
 
 let dirs: string[] = []
@@ -336,5 +337,132 @@ describe('ExtractionService outbox integration', () => {
     const status = await h.service.status()
     expect(status.outbox.complete).toBe(1)
     expect(status.queue).toMatchObject({ ingested: 1 })
+  })
+})
+describe('ExtractionService deferred LLM pass', () => {
+  const fact = 'our staging deploys go out on Thursdays and always via the blue pipeline'
+  const llmBody = {
+    choices: [
+      {
+        message: {
+          content:
+            '[{"key":"staging-deploy-day","fact":"staging deploys go out on Thursdays via the blue pipeline"}]',
+        },
+      },
+    ],
+  }
+
+  function deferHarness(dir: string, fetchImpl: typeof fetch, metrics: Metrics, apiKeyEnv?: string) {
+    const remembered: string[] = []
+    const headers: Array<Record<string, string>> = []
+    const config = parseConfig({
+      scopeDefaults: { projectId: 'e2e' },
+      extraction: {
+        queue: { dir },
+        llm: {
+          settleMs: 1_000,
+          ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+        },
+      },
+    })
+    const service = new ExtractionService({
+      config,
+      metrics,
+      fetchImpl: (async (url: string, init: RequestInit) => {
+        headers.push(init.headers as Record<string, string>)
+        return fetchImpl(url, init)
+      }) as typeof fetch,
+      coordinator: {
+        async resolveIdentity(identity: CallerIdentity) {
+          return { ...identity, principalId: 'p1' }
+        },
+        async remember(request) {
+          remembered.push(request.text)
+          return {
+            id: 'mem-y',
+            scope: { scope: 'project', id: 'x' },
+            createdAt: 'now',
+            deduplicated: false,
+          } as RememberResult
+        },
+        async forgetByText() {
+          return { forgotten: 0, ids: [] }
+        },
+      },
+    })
+    return { service, remembered, headers, config }
+  }
+
+  it('returns before the LLM answers, then settle() awaits the candidate and ingest', async () => {
+    const dir = await tempDir()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchImpl = (async () => {
+      await gate
+      return { ok: true, async json() { return llmBody } }
+    }) as unknown as typeof fetch
+    const metrics = new Metrics()
+    const h = deferHarness(dir, fetchImpl, metrics)
+
+    await h.service.handleTurn(
+      { sessionId: 'session-a', turn: 1, messages: [{ text: fact }] },
+      { llm: 'defer' },
+    )
+    // Deferred: the fast path returned while the model call is still pending.
+    expect(h.remembered).toEqual([])
+    expect(metrics.snapshot().counters['extraction.llm.deferred']).toBe(1)
+
+    const settled = h.service.settle('session-a', 2_000)
+    release()
+    await expect(settled).resolves.toBe(true)
+    expect(h.remembered).toEqual(['staging deploys go out on Thursdays via the blue pipeline'])
+    expect(metrics.snapshot().counters['extraction.llm.settled']).toBe(1)
+    const status = await h.service.status()
+    expect(status.queue.ingested).toBe(1)
+    expect(status.lastCandidates[0]).toMatchObject({ semanticKey: 'staging-deploy-day' })
+  })
+
+  it('bounds the settle wait and reports a timeout instead of stalling the turn', async () => {
+    const dir = await tempDir()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchImpl = (async () => {
+      await gate
+      return { ok: true, async json() { return llmBody } }
+    }) as unknown as typeof fetch
+    const metrics = new Metrics()
+    const h = deferHarness(dir, fetchImpl, metrics)
+    await h.service.handleTurn(
+      { sessionId: 'session-b', turn: 1, messages: [{ text: fact }] },
+      { llm: 'defer' },
+    )
+    const started = Date.now()
+    await expect(h.service.settle('session-b', 50)).resolves.toBe(false)
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(metrics.snapshot().counters['extraction.llm.settleTimeouts']).toBe(1)
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+
+  it('sends the configured Studio key from the environment', async () => {
+    process.env.COGNEE_TEST_SERVICE_KEY = 'sk-service-secret'
+    try {
+      const dir = await tempDir()
+      const fetchImpl = (async () => ({ ok: true, async json() { return llmBody } })) as unknown as typeof fetch
+      const h = deferHarness(dir, fetchImpl, new Metrics(), 'COGNEE_TEST_SERVICE_KEY')
+      await h.service.handleTurn({
+        sessionId: 'session-c',
+        turn: 1,
+        messages: [{ text: fact }],
+      })
+      expect(h.headers[0]?.authorization).toBe('Bearer sk-service-secret')
+      expect(JSON.stringify(await h.service.status())).not.toContain('sk-service-secret')
+    } finally {
+      delete process.env.COGNEE_TEST_SERVICE_KEY
+    }
   })
 })
