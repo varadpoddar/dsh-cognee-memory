@@ -31,6 +31,7 @@ import { createRecallTool } from './tools/recall.js'
 import { createRememberTool } from './tools/remember.js'
 import { createForgetTool } from './tools/forget.js'
 import { createStatusTool } from './tools/status.js'
+import { registerCogneeService } from './service/cognee.js'
 
 /** Cordis plugin name. */
 export const name = 'cognee-memory'
@@ -102,6 +103,12 @@ export {
 export { IdentityResolver, PRINCIPAL_ENV } from './memory/identity.js'
 export { EphemeralSessionMemory } from './memory/ephemeral.js'
 export { createMemoryAdapter } from './adapters/memory-adapter.js'
+export {
+  COGNEE_SERVICE_NAME,
+  createCogneeService,
+  registerCogneeService,
+} from './service/cognee.js'
+export type { CogneeServiceApi, CogneeServiceStatus } from './service/cognee.js'
 
 /**
  * Apply the plugin. Tool and prompt registrations are reversible; the returned
@@ -155,6 +162,11 @@ export function apply(
 
   const disposers: Array<() => unknown> = []
   let disposed = false
+
+  // Shared, typed `ctx.cognee` service: a thin, authorization-preserving
+  // surface over the same coordinator the tools and hooks use. Registration is
+  // fiber-owned, so unload/dispose removes it with everything else below.
+  disposers.push(registerCogneeService(ctx, { coordinator, config, metrics }))
 
   const dispose = (): void => {
     if (disposed) return

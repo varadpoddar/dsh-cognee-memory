@@ -249,6 +249,13 @@ export interface PluginContextLike {
    * optional service is consumed without making the whole plugin depend on it.
    */
   inject?(deps: readonly string[], callback: (ctx: PluginContextLike) => void): unknown
+  /**
+   * Cordis's fiber-owned service registration (`ctx.provide(name, value)`).
+   * The service is unregistered when the returned disposer runs or the
+   * providing fiber unloads. Optional so structural test doubles still apply;
+   * `registerCogneeService` degrades to a no-op when it is absent.
+   */
+  provide?(name: string, value: unknown): (() => void) | void
   on(name: string, listener: (...args: never[]) => unknown): () => unknown
   effect?(execute: () => (() => void) | void): () => unknown
   logger?(name: string): PluginLoggerLike

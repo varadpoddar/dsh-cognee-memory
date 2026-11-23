@@ -19,6 +19,8 @@ export type MetricName =
   | 'extraction.failed'
   | 'extraction.llm.requests'
   | 'extraction.llm.failures'
+  | 'cognee.service.degraded'
+  | 'cognee.service.conflict'
   | 'forget.requests'
   | 'forget.unsupported'
   | 'redaction.blocked'
@@ -68,6 +70,8 @@ const METRIC_NAMES: readonly MetricName[] = [
   'extraction.failed',
   'extraction.llm.requests',
   'extraction.llm.failures',
+  'cognee.service.degraded',
+  'cognee.service.conflict',
   'forget.requests',
   'forget.unsupported',
   'redaction.blocked',

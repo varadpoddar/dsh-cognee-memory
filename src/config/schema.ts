@@ -152,8 +152,8 @@ export const CogneeMemoryConfigSchema = z
     /**
      * Automatic extraction from committed session events. Deterministic
      * commands ("remember that…", "forget…", "actually it's…") never depend on
-     * a model. The optional LLM pass is disabled by default and may only target
-     * a private/local endpoint.
+     * a model. The LLM pass is on by default because most durable facts are
+     * stated implicitly, and it may only target a private/local endpoint.
      */
     extraction: z
       .object({
@@ -165,8 +165,16 @@ export const CogneeMemoryConfigSchema = z
             enabled: z.boolean().default(false),
             endpoint: httpUrl.default('http://10.20.10.40:8888/v1'),
             model: nonEmpty.default('unsloth/Qwen3.8-27B-GGUF'),
+            /** Environment variable holding the Studio key; never the key itself. */
+            apiKeyEnv: nonEmpty.default('UNSLOTH_LARGE_API_KEY'),
             timeoutMs: z.number().int().min(500).max(120_000).default(15_000),
             maxCandidates: z.number().int().min(1).max(10).default(3),
+            /**
+             * Hard cap on the post-response settle wait (after the assistant
+             * response, before the turn boundary), so a slow extractor cannot
+             * add more than this to a turn.
+             */
+            settleMs: z.number().int().min(50).max(30_000).default(4_000),
           })
           .prefault({}),
         queue: z
@@ -277,6 +285,18 @@ export const CogneeMemoryConfigSchema = z
 
     tools: z.object({ enabled: z.boolean().default(true) }).prefault({}),
     telemetry: z.object({ enabled: z.boolean().default(true) }).prefault({}),
+
+    /**
+     * Settings page discoverability. `publicBaseUrl` is the browser-facing
+     * origin of the web profile (e.g. the Traefik host); it is printed by
+     * `memory_status` so the page is reachable without guessing. Empty means
+     * "only the path is known" (headless or no reverse proxy).
+     */
+    settings: z
+      .object({
+        publicBaseUrl: z.string().trim().optional(),
+      })
+      .prefault({}),
   })
   .superRefine((config, ctx) => {
     if (config.transport === 'mcp-http' && config.mcpUrl === undefined) {
