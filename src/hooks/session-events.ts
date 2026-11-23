@@ -75,6 +75,12 @@ export function registerSessionExtraction(
   deps: {
     readonly extraction: Pick<ExtractionService, 'handleTurn'>
     readonly metrics?: Metrics
+    /**
+     * Upper bound on how long the serial turn boundary waits for extraction
+     * after the response. A timed-out pass keeps running in the background; a
+     * one-shot headless profile sets this high enough to finish ingesting.
+     */
+    readonly settleMs?: number
   },
 ): () => void {
   const buckets = new Map<string, TurnBucket>()
@@ -169,11 +175,25 @@ export function registerSessionExtraction(
       // path that guarantees a one-shot process finishes extraction + ingest.
       if (bucket !== undefined && bucket.messages.length > 0) {
         buckets.delete(sessionId)
-        await deps.extraction.handleTurn({
+        const pass = deps.extraction.handleTurn({
           sessionId,
           turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
           messages: bucket.messages,
           ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
+        })
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const budget = deps.settleMs ?? 1_000
+        await Promise.race([
+          pass,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, budget)
+            ;(timer as { unref?: () => void }).unref?.()
+          }),
+        ])
+        if (timer !== undefined) clearTimeout(timer)
+        // Keep the pass from becoming an unhandled rejection after a timeout.
+        void pass.catch(() => {
+          deps.metrics?.increment('extraction.failed')
         })
       }
     } catch {

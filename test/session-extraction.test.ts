@@ -173,4 +173,35 @@ describe('committed session extraction hook', () => {
     h.dispose()
     expect(h.fake.listeners).toEqual([])
   })
+
+  it('bounds the awaited post-response extraction by settleMs', async () => {
+    const fake = createFakePluginContext()
+    registerSessionExtraction(fake.ctx, {
+      extraction: {
+        async handleTurn() {
+          await new Promise(() => {})
+        },
+      },
+      settleMs: 20,
+    })
+    const emit = (name: string, ...args: unknown[]): void => {
+      for (const entry of fake.listeners) {
+        if (entry.name === name) entry.listener(...(args as never[]))
+      }
+    }
+    const emitAsync = async (name: string, ...args: unknown[]): Promise<void> => {
+      for (const entry of fake.listeners) {
+        if (entry.name === name) await (entry.listener(...(args as never[])) as Promise<void>)
+      }
+    }
+    emit('session/event', session, { type: 'turn/start', turn: 9 })
+    emit('session/event', session, {
+      type: 'user/message',
+      turn: 9,
+      message: userMessage('The flag is on.'),
+    })
+    const started = Date.now()
+    await emitAsync('agent/turn-stopping', { agent: session, turn: 9 })
+    expect(Date.now() - started).toBeLessThan(500)
+  })
 })

@@ -201,7 +201,13 @@ export function apply(
   // Automatic extraction runs independently of tools. It watches the
   // post-commit session feed, so `tools.enabled: false` changes nothing here.
   const extraction = new ExtractionService({ coordinator, config, metrics })
-  disposers.push(registerSessionExtraction(ctx, { extraction, metrics }))
+  disposers.push(
+    registerSessionExtraction(ctx, {
+      extraction,
+      metrics,
+      settleMs: config.extraction.llm.settleMs,
+    }),
+  )
   void extraction.start().catch(() => metrics.increment('extraction.failed'))
 
   // Present only where the profile mounts dsh-host-webserver (the shipped `web`
