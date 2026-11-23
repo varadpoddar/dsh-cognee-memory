@@ -368,7 +368,13 @@ export class ExtractionService {
     this.stagedLlm.set(sessionId, { inputs, resolved, scopeName, scopeKeyValue })
   }
 
-  /** Start a staged pass (idempotent per session) behind a per-session chain. */
+  /**
+   * Start a staged pass (idempotent per session). The tracked task covers the
+   * LLM request, queue enqueue and Cognee drain, so `settle()` returning true
+   * means the candidate is durable *and* ingested. The pass is started only
+   * after the response (never concurrently with the turn's own model request),
+   * and each profile chooses how long the turn boundary may wait for it.
+   */
   private startStagedPass(sessionId: string): void {
     if (this.llmTasks.has(sessionId)) return
     const staged = this.stagedLlm.get(sessionId)

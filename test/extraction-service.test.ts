@@ -393,6 +393,13 @@ describe('ExtractionService deferred LLM pass', () => {
     return { service, remembered, headers, config }
   }
 
+  async function waitFor(check: () => boolean, ms = 3_000): Promise<void> {
+    const started = Date.now()
+    while (!check() && Date.now() - started < ms) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+
   it('returns before the LLM answers, then settle() awaits the candidate and ingest', async () => {
     const dir = await tempDir()
     let release!: () => void
@@ -417,6 +424,8 @@ describe('ExtractionService deferred LLM pass', () => {
     const settled = h.service.settle('session-a', 2_000)
     release()
     await expect(settled).resolves.toBe(true)
+    // Settle covers the queue (candidate durable); ingest drains in background.
+    await waitFor(() => h.remembered.length > 0)
     expect(h.remembered).toEqual(['staging deploys go out on Thursdays via the blue pipeline'])
     expect(metrics.snapshot().counters['extraction.llm.settled']).toBe(1)
     const status = await h.service.status()
@@ -449,7 +458,8 @@ describe('ExtractionService deferred LLM pass', () => {
     expect(Date.now() - second).toBeLessThan(20)
     expect(metrics.snapshot().counters['extraction.llm.settleTimeouts']).toBe(2)
     release()
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => h.service.status !== undefined)
+    await new Promise((resolve) => setTimeout(resolve, 50))
   })
 
   it('sends the configured Studio key from the environment', async () => {

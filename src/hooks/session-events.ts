@@ -73,7 +73,7 @@ function sessionIdOf(session: SessionLike): string | undefined {
 export function registerSessionExtraction(
   ctx: PluginContextLike,
   deps: {
-    readonly extraction: Pick<ExtractionService, 'handleTurn' | 'settle'>
+    readonly extraction: Pick<ExtractionService, 'handleTurn'>
     readonly metrics?: Metrics
   },
 ): () => void {
@@ -142,55 +142,14 @@ export function registerSessionExtraction(
    * confirms ingestion, while still reading only committed session records.
    */
   const onLlmStream = (
-    options: LlmStreamOptions,
+    _options: LlmStreamOptions,
     next: () => AsyncIterable<unknown>,
   ): AsyncIterable<unknown> => {
-    return (async function* streamAfterExtraction() {
-      deps.metrics?.increment('extraction.streams')
-      const sessionId = typeof options.sessionId === 'string' ? options.sessionId : undefined
-      let drained = false
-      if (sessionId !== undefined) {
-        const bucket = buckets.get(sessionId)
-        const session = sessions.get(sessionId)
-        const streamPreset = session?.header?.agentPreset
-        if (bucket !== undefined && bucket.messages.length > 0) {
-          deps.metrics?.increment('extraction.streamsWithBucket')
-          buckets.delete(sessionId)
-          drained = true
-          // Fast path only: deterministic commands are queued/ingested before
-          // the first token; the LLM pass is deferred behind the response.
-          try {
-            await deps.extraction.handleTurn(
-              {
-                sessionId,
-                turn: bucket.turn,
-                messages: bucket.messages,
-                ...(typeof streamPreset === 'string' && streamPreset !== ''
-                  ? { agentPreset: streamPreset }
-                  : {}),
-              },
-              { llm: 'defer' },
-            )
-          } catch {
-            deps.metrics?.increment('extraction.failed')
-          }
-        }
-      }
-      try {
-        yield* next()
-      } finally {
-        // After the response is streamed (never before the first token): bound
-        // the wait so a slow local extractor cannot delay the turn. This is
-        // also what guarantees a one-shot headless run ingests its candidate.
-        if (sessionId !== undefined && drained) {
-          try {
-            await deps.extraction.settle(sessionId)
-          } catch {
-            deps.metrics?.increment('extraction.failed')
-          }
-        }
-      }
-    })()
+    // Deliberately a pass-through: extraction never runs before the first
+    // token and never competes with the turn's own model request. It starts
+    // after the response at `turn/end` / `agent/turn-stopping`.
+    deps.metrics?.increment('extraction.streams')
+    return next()
   }
 
   /**
@@ -206,21 +165,17 @@ export function registerSessionExtraction(
     const bucket = buckets.get(sessionId)
     const preset = session.header?.agentPreset
     try {
-      // Runs after the response is produced, so deferring the LLM here costs
-      // no first-token latency; `settle` then bounds the boundary wait.
+      // Runs after the response is produced. This is the awaited-after-response
+      // path that guarantees a one-shot process finishes extraction + ingest.
       if (bucket !== undefined && bucket.messages.length > 0) {
         buckets.delete(sessionId)
-        await deps.extraction.handleTurn(
-          {
-            sessionId,
-            turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
-            messages: bucket.messages,
-            ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
-          },
-          { llm: 'defer' },
-        )
+        await deps.extraction.handleTurn({
+          sessionId,
+          turn: typeof payload.turn === 'number' ? payload.turn : bucket.turn,
+          messages: bucket.messages,
+          ...(typeof preset === 'string' && preset !== '' ? { agentPreset: preset } : {}),
+        })
       }
-      await deps.extraction.settle(sessionId)
     } catch {
       deps.metrics?.increment('extraction.failed')
     }
