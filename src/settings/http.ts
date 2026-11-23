@@ -21,12 +21,13 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { SETTINGS_TOKEN_ENV, type SettingsStatus, type SettingsStore } from './store.js'
+import { SETTINGS_PAGE_PATH } from './url.js'
 import { MEMORY_INSPECTION_STATES, type SettingsInspection } from './inspect.js'
 import { withTimeout } from '../memory/context-format.js'
 import type { WebServerLike } from '../types.js'
 
-/** Path of the settings page. */
-export const SETTINGS_PAGE_PATH = '/plugins/cognee-memory/settings'
+/** Path of the settings page; re-exported from `./url.ts` where it is declared. */
+export { SETTINGS_PAGE_PATH }
 /** Path of the machine-readable status. */
 export const SETTINGS_JSON_PATH = '/plugins/cognee-memory/settings.json'
 /**

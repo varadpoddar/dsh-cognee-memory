@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { validateCogneeUrl } from '../src/settings/url.js'
+import {
+  SETTINGS_PAGE_PATH,
+  SETTINGS_TOKEN_PLACEHOLDER,
+  buildSettingsUrl,
+  validateCogneeUrl,
+} from '../src/settings/url.js'
 
 describe('runtime Cognee URL validation', () => {
   it('accepts http and https and normalizes a trailing slash', () => {
@@ -33,5 +38,24 @@ describe('runtime Cognee URL validation', () => {
     expect(validateCogneeUrl(undefined).ok).toBe(false)
     expect(validateCogneeUrl(42).ok).toBe(false)
     expect(validateCogneeUrl(`http://h/${'a'.repeat(2_100)}`).ok).toBe(false)
+  })
+})
+describe('settings page location', () => {
+  it('builds the exact public URL with a literal token placeholder', () => {
+    const location = buildSettingsUrl('https://dsh.nomad.opsc.io/', {
+      COGNEE_MEMORY_SETTINGS_TOKEN: 'super-secret-token',
+    })
+    expect(location.url).toBe(
+      `https://dsh.nomad.opsc.io${SETTINGS_PAGE_PATH}?token=${SETTINGS_TOKEN_PLACEHOLDER}`,
+    )
+    expect(location.tokenSet).toBe(true)
+    expect(location.tokenSource).toContain('/etc/dsh/cognee.env')
+    expect(JSON.stringify(location)).not.toContain('super-secret-token')
+  })
+
+  it('falls back to the path alone without a public base and reports an unset token', () => {
+    const location = buildSettingsUrl(undefined, {})
+    expect(location.url).toBe(`${SETTINGS_PAGE_PATH}?token=${SETTINGS_TOKEN_PLACEHOLDER}`)
+    expect(location.tokenSet).toBe(false)
   })
 })

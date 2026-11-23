@@ -7,6 +7,48 @@
  * base URL (query, fragment) and returns a message fit for rendering.
  */
 import { httpUrlSchema } from '../config/schema.js'
+import { SETTINGS_TOKEN_ENV } from './store.js'
+
+/** Path of the settings page (declared here to avoid a route/helper import cycle). */
+export const SETTINGS_PAGE_PATH = '/plugins/cognee-memory/settings'
+
+/** The token placeholder printed by `memory_status`; never the token value. */
+export const SETTINGS_TOKEN_PLACEHOLDER = '<COGNEE_MEMORY_SETTINGS_TOKEN>'
+
+/** Where the real token lives, for the operator reading status output. */
+export const SETTINGS_TOKEN_SOURCE =
+  `${SETTINGS_TOKEN_ENV} in /etc/dsh/cognee.env (service environment)`
+
+export interface SettingsPageLocation {
+  /** Exact page URL, with the token as a literal placeholder. */
+  readonly url: string
+  /** Whether the token variable is present; the value itself is never read. */
+  readonly tokenSet: boolean
+  readonly tokenSource: string
+}
+
+/**
+ * Build the operator-facing settings URL. `publicBaseUrl` is the deployment's
+ * browser origin (Traefik/reverse proxy) because the plugin does not know it at
+ * runtime; without one the path alone is returned, which is still useful in a
+ * headless log.
+ *
+ * The real token is deliberately not interpolated: status output may reach the
+ * model, logs, or a transcript, while the operator can read the variable from
+ * the service environment.
+ */
+export function buildSettingsUrl(
+  publicBaseUrl?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): SettingsPageLocation {
+  const base = (publicBaseUrl ?? '').trim().replace(/\/+$/, '')
+  const tokenSet = (env[SETTINGS_TOKEN_ENV] ?? '').trim() !== ''
+  return {
+    url: `${base}${SETTINGS_PAGE_PATH}?token=${SETTINGS_TOKEN_PLACEHOLDER}`,
+    tokenSet,
+    tokenSource: SETTINGS_TOKEN_SOURCE,
+  }
+}
 
 /** A base URL longer than this is a mistake, not a deployment. */
 const MAX_URL_LENGTH = 2_048

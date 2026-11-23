@@ -26,6 +26,7 @@ import { buildInspection } from './settings/inspect.js'
 import { ProvenanceIndex, resolveProvenancePath, type ProvenanceAccess } from './memory/provenance-index.js'
 import { registerProvenanceRoutes } from './settings/provenance-http.js'
 import { SettingsStore, resolveSettingsPath } from './settings/store.js'
+import { buildSettingsUrl } from './settings/url.js'
 import { registerSettingsRoutes } from './settings/http.js'
 import { createRecallTool } from './tools/recall.js'
 import { createRememberTool } from './tools/remember.js'
@@ -277,11 +278,18 @@ export function apply(
   }
 
   if (config.tools.enabled) {
+    // The settings page URL includes a literal token placeholder: `memory_status`
+    // is model-visible, so the real token is never interpolated. It lives in
+    // COGNEE_MEMORY_SETTINGS_TOKEN (deployment: /etc/dsh/cognee.env).
+    const settingsLocation = buildSettingsUrl(
+      settings.current().settings.publicBaseUrl,
+      process.env,
+    )
     const tools: ToolDefinitionLike[] = [
       createRecallTool({ coordinator, config, metrics }),
       createRememberTool({ coordinator, config, metrics }),
       createForgetTool({ coordinator, config, metrics }),
-      createStatusTool({ coordinator, config, metrics, extraction }),
+      createStatusTool({ coordinator, config, metrics, extraction, settings: settingsLocation }),
     ]
     for (const definition of tools) {
       disposers.push(ctx.tools.register(definition))

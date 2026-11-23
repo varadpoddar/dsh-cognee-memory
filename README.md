@@ -108,6 +108,17 @@ Minimal profile entry:
 wrong token `401`. A saved Cognee URL applies to the next memory call; no
 restart is needed for the address alone.
 
+On the live deployment the page is reachable at:
+
+```
+https://dsh.nomad.opsc.io/plugins/cognee-memory/settings?token=<COGNEE_MEMORY_SETTINGS_TOKEN>
+```
+
+The token is in `/etc/dsh/cognee.env`; `memory_status` prints the URL (with that
+placeholder, never the value) when `settings.publicBaseUrl` is configured. The
+routes exist only in a profile that mounts `dsh-host-webserver` (the `web`
+profile). See [docs/SETTINGS.md](docs/SETTINGS.md) for the full access matrix.
+
 ## Operator CLI
 
 The package ships a `memory` bin (run it from an installed profile):

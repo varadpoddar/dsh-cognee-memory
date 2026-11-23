@@ -37,8 +37,30 @@ Both routes are exact-path registrations on the profile's web server:
 | `POST` | `/plugins/cognee-memory/settings` | validate → persist → `303` back to the form |
 | `GET` | `/plugins/cognee-memory/settings.json` | JSON status (no secret) |
 
-On the shipped `web` profile the origin is whatever the web server logs, e.g.
-`http://127.0.0.1:3080/plugins/cognee-memory/settings?token=<token>`.
+The routes are mounted only where the profile composes `dsh-host-webserver` — the
+shipped `web` profile does, `headless` does not. In this deployment the web UI is
+served through Traefik, so the **public** page is:
+
+```
+https://dsh.nomad.opsc.io/plugins/cognee-memory/settings?token=<COGNEE_MEMORY_SETTINGS_TOKEN>
+```
+
+`memory_status` prints that URL with the token as a literal placeholder. The
+deployment supplies the origin through the profile config
+`settings.publicBaseUrl: https://dsh.nomad.opsc.io` (without it the status output
+shows the path only). The real token lives in `/etc/dsh/cognee.env` and reaches
+the service through its systemd drop-in; read it without copying it into a repo,
+log, or transcript:
+
+```bash
+ssh root@control.nomad.opsc.io \
+  "pct exec 103 -- grep '^COGNEE_MEMORY_SETTINGS_TOKEN=' /etc/dsh/cognee.env"
+```
+
+Verified externally against the live deployment: `200` with the token (HTML
+form), `401` without a token, `401` with a wrong token, and `503` while
+`COGNEE_MEMORY_SETTINGS_TOKEN` is unset in the service environment (a restart is
+required for the unset/set transition because the value is read at plugin load).
 
 Access requires `COGNEE_MEMORY_SETTINGS_TOKEN` in the harness environment:
 

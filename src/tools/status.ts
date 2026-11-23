@@ -4,6 +4,7 @@ import type { MemoryCoordinator } from '../memory/coordinator.js'
 import type { ExtractionSnapshot } from '../memory/extraction-service.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type { JsonValue, ToolDefinitionLike, ToolRunContextLike } from '../types.js'
+import type { SettingsPageLocation } from '../settings/url.js'
 import { parseToolArgs, rethrowToolError, textBlock } from './shared.js'
 
 export interface StatusToolDependencies {
@@ -11,6 +12,11 @@ export interface StatusToolDependencies {
   readonly config: CogneeMemoryConfig
   readonly metrics?: Metrics
   readonly extraction?: { status(): Promise<ExtractionSnapshot> }
+  /**
+   * Browser-facing settings location. The URL carries a literal token
+   * placeholder; the real value never reaches this output.
+   */
+  readonly settings?: SettingsPageLocation
 }
 
 const argsSchema = z.object({}).strict()
@@ -71,6 +77,7 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
       },
       render: (_args: unknown, value: unknown) => {
         const typed = value as StatusToolValue
+        const settings = typed.details.settings as SettingsPageLocation | undefined
         return textBlock(
           [
             'Cognee memory status',
@@ -83,6 +90,12 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
             countSummary(typed.counters),
             `memory namespaces: ${JSON.stringify((typed.details as { namespaces?: unknown }).namespaces ?? {})}`,
             `extraction: ${JSON.stringify((typed.details as { extraction?: unknown }).extraction ?? {})}`,
+            ...(settings === undefined
+              ? []
+              : [
+                  `settings page: ${settings.url}`,
+                  `settings token: ${settings.tokenSource}${settings.tokenSet ? '' : ' (currently unset -> the page answers 503)'}`,
+                ]),
           ].join('\n'),
         )
       },
@@ -107,6 +120,9 @@ export function createStatusTool(deps: StatusToolDependencies): ToolDefinitionLi
             ...(status.adapter.details ?? {}),
             ...(status.namespaces === undefined ? {} : { namespaces: status.namespaces as JsonValue }),
             ...(extraction === undefined ? {} : { extraction }),
+            ...(deps.settings === undefined
+              ? {}
+              : { settings: deps.settings as unknown as JsonValue }),
           },
         }
       } catch (error) {
