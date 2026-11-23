@@ -63,7 +63,7 @@ in the settings file, rendered on the page, or written to the provenance index.
 | Variable | Purpose |
 | --- | --- |
 | `COGNEE_API_KEY` | Cognee API key (required for REST) |
-| `COGNEE_MEMORY_API_BASE_URL` | Cognee base URL override, e.g. `http://10.20.10.15:8000/api/v1` |
+| `COGNEE_MEMORY_API_BASE_URL` | Cognee base URL override, e.g. `http://cognee.internal:8000/api/v1` |
 | `COGNEE_MEMORY_ENABLED` | `true`/`false` master switch |
 | `COGNEE_MEMORY_AUTO_RECALL` | prefetch + prompt injection on/off |
 | `COGNEE_MEMORY_AUTO_WRITE` | extraction / task-outcome write-back on/off |
@@ -85,7 +85,7 @@ Minimal profile entry:
       config:
         enabled: true
         transport: rest
-        apiBaseUrl: http://10.20.10.15:8000/api/v1
+        apiBaseUrl: http://cognee.internal:8000/api/v1
         authMode: api-key
         apiTokenEnv: COGNEE_API_KEY
         failureMode: open            # prompt recall degrades instead of failing turns
@@ -226,7 +226,7 @@ UI     settings page · provenance JSON/HTML · right-sidebar provenance panel
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Model calls return `401` (Studio/LLM) | Stale Studio key. Refresh `/etc/dsh/llm.env` from the key host (`ssh root@10.20.10.30 'cat /root/.studio.key'`), keep it `0640 root:dsh`, restart the service. Web-profile sessions can also re-enter the provider key in the UI. |
+| Model calls return `401` (Studio/LLM) | Stale Studio key. Refresh `/etc/dsh/llm.env` from the key host (`ssh root@llm-host 'cat /root/.studio.key'`), keep it `0640 root:dsh`, restart the service. Web-profile sessions can also re-enter the provider key in the UI. |
 | `permission denied` reading an env file, or service starts without the key | Env files must be `0640 root:dsh` (`install -o root -g dsh -m 0640 …`). systemd reads them as root before dropping to `User=dsh`. |
 | Plugin installed but not mounted / tools missing | The composed tree is read at boot: `systemctl restart deepseek-harness`. Also confirm you installed into the service profile (`--profile web` with `DSH_HOME=/var/lib/deepseek-harness/.dsh`), not root's `/root/.dsh`. |
 | Settings page returns `503` | `COGNEE_MEMORY_SETTINGS_TOKEN` is unset in the service environment. |
