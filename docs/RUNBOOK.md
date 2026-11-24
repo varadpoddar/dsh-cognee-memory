@@ -165,3 +165,54 @@ pct exec 103 -- bash -c 'set -a; . /etc/dsh/cognee.env; set +a; \
 The `Known context:` block now ends every line with the absolute panel URL. The
 retrieval cap is still stable 300 + query 900; if the added URL would exceed it,
 the formatter drops whole lower-ranked items rather than splitting a line.
+
+## 9. Nightly ingest queue (deployed CLI, timer)
+
+The archival pipeline runs as a standalone CLI from `/opt/dsh-cognee-memory`
+(package 1.0.3, `npm install --omit=dev`, built `lib/`), as user `varad`, against
+`DSH_HOME=/home/varad/.dsh` — the live `dsh` instance's home is not involved.
+
+```bash
+# state (read-only)
+pct exec 103 -- su varad -s /bin/bash -c 'cd /opt/dsh-cognee-memory; set -a; \
+  . /etc/dsh-varad/varad.env; set +a; export DSH_HOME=/home/varad/.dsh; \
+  node lib/cli/main.js queue status --json'
+
+# timer + last/next run
+pct exec 103 -- systemctl list-timers dsh-cognify-queue.timer --no-pager
+
+# manual drain (dry run first; `--apply` writes)
+pct exec 103 -- su varad -s /bin/bash -c 'cd /opt/dsh-cognee-memory; set -a; \
+  . /etc/dsh-varad/varad.env; set +a; \
+  export DSH_HOME=/home/varad/.dsh COGNEE_MEMORY_API_BASE_URL=http://10.20.10.15:8000/api/v1; \
+  node lib/cli/main.js queue drain --workers 2; \
+  node lib/cli/main.js queue drain --apply --workers 2 --json'
+
+# trigger one nightly run now (same env as the unit)
+pct exec 103 -- systemctl start dsh-cognify-queue.service
+pct exec 103 -- journalctl -u dsh-cognify-queue -n 20 --no-pager
+```
+
+Gotchas learned the hard way (2026-11-24):
+
+- **Base URL.** The CLI reads `COGNEE_MEMORY_API_BASE_URL`, not the
+  `COGNEE_BASE_URL` used by the MCP servers. Unset, it silently defaults to
+  `http://127.0.0.1:8000` and retries; the unit now sets it explicitly.
+- **Silent early exit.** Retry backoff sleeps unref their timer, so a standalone
+  drain used to empty the event loop and exit 0 mid-retry with items left
+  `inflight`. Fixed by a ref'd keep-alive for the duration of the drain; if you
+  see `inflight` without a running node process, the lease reclaims after 15 min.
+- **Dataset name vs scope name.** The dataset is `dsh-<scope>-<scopeId>`; the
+  varad instance's project id carries a hash suffix
+  (`varad-mac-history-5c5a11e6b8d6859e32a4`). Enqueueing `project:varad-mac-history`
+  creates a *parallel* dataset and the live instance never recalls from it.
+  Copy the id from `memory_status` or `provenance.json`, never from a doc summary.
+- **Workers.** `--workers` is capped by the number of targets; two aliases of one
+  base URL (`COGNEE_QUEUE_ENDPOINTS=a=url,b=url`) is how to run two workers
+  against a single endpoint.
+
+Backups written before the 2026-11-24 backfill in
+`/home/varad/.dsh/plugins/cognee-memory/`: `ingest-queue.pre-backfill.bak` (pristine
+247-item queue) and `ledger.pre-backfill.bak` (ledger snapshot). The queue log is
+append-only JSONL; `queue status` folds it, `IngestQueue.compact()` is the only
+truncation.

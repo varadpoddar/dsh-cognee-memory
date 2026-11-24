@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.3 — 2026-11-24
+
+Deployment of the nightly pipeline and the first full-corpus Mac backfill. No
+Cognee schema migration; existing datasets, provenance ids and the `dsh`
+instance are untouched.
+
+### Redaction defaults
+
+- The LLM PII pass is **off by default** (`COGNEE_PII_ENABLED=false`); one env
+  line (`COGNEE_PII_ENABLED=true`) re-enables it. Code comment, CLI help and
+  `docs/REDACTION_POLICY.md` now state the default explicitly.
+- The deterministic shaped-secret scrub is **unconditional** on the ingest
+  path: no env var disables it, and enabling PII does not weaken it. The split
+  (credential = incident, name/address = operator choice) is documented, and a
+  test asserts shaped secrets are still removed with no options at all.
+
+### Nightly drain correctness
+
+- A standalone `queue drain` no longer exits 0 mid-retry. Retry backoff sleeps
+  unref their timer (correct inside the host process, wrong for a CLI), which
+  used to empty the event loop and leave items `inflight` with no error. The
+  drain now holds one ref'd keep-alive interval for its lifetime.
+- `deploy/systemd/dsh-cognify-queue.service` pointed `COGNEE_QUEUE_ENDPOINTS` at
+  the LLM endpoint. Queue targets are Cognee writers, so it now names the Cognee
+  base URL (twice — two workers against the single endpoint) and sets
+  `COGNEE_MEMORY_API_BASE_URL`, the settings env name the CLI actually reads
+  (`COGNEE_BASE_URL` is the MCP servers' variable).
+- `deploy/` and the pipeline docs are now in the npm `files` list, so the unit
+  files ship with the tarball.
+
+### Deployment
+
+- Package installed at `/opt/dsh-cognee-memory` (node 22, runtime deps only),
+  owner `varad`, as `su varad`. `dsh-cognify-queue.timer` enabled and verified;
+  `dsh` and `deepseek-harness-varad.service` still `active`/`running`.
+
+### Full Mac-history backfill
+
+- 682 Mac sessions → **247 unique queue items**; drained at 2 workers against the
+  single Cognee endpoint in **51 m 46 s** (12.6 s/item wall, 123/122 split).
+- **245 done** first attempt, 2 terminal failures (payloads starting with
+  `http(s)://` get a `403` from Cognee, which treats them as external URLs); both
+  re-enqueued with a `url: ` prefix and ingested, so 247/249 items landed.
+- Dataset `dsh-project-varad-mac-history-5c5a11e6b8d6859e32a4`
+  (`c74cc337-4d0c-5ac9-b85f-8d6560be37a1`), **254 records** (9 pre-existing + 245
+  new; 2 items deduplicated at write time).
+- Verified: 5/5 sampled records re-retrieved by `CHUNKS`; 5/5 facts quoted
+  verbatim by the varad instance's `memory_recall`; a fresh tools-off single
+  message recalled an older Mac conversation's Task 1 branch/constraint.
+
 ## 1.0.2 — 2026-11-23
 
 Profile-layer, service and panel hardening. No Cognee schema migration; memory

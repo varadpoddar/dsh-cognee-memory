@@ -93,21 +93,71 @@ the only thing that would move it materially.
 
 `--drain` for a manual run is just `memory queue drain --apply`.
 
-**Deployment state: units installed and `systemd-analyze verify`-clean on CT 103,
-timer intentionally NOT enabled.** The service `ExecStart` points at
-`/opt/dsh-cognee-memory/lib/cli/main.js`, which does not exist yet — the package
-(runtime deps included) has not been deployed there, and enabling a timer that
-fails nightly would be worse than not scheduling it. Enabling is:
+## Deployment (2026-11-24)
+
+The CLI is installed and the timer is live:
+
+| item | value |
+| --- | --- |
+| deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.3**, node 22.23.5 |
+| runtime deps | `npm install --omit=dev --legacy-peer-deps` → `zod` only; built `lib/` ships in the tarball |
+| units | `/etc/systemd/system/dsh-cognify-queue.{service,timer}`, `systemd-analyze verify`-clean |
+| timer | **enabled/active**, next `Wed 2026-11-25 02:34:35 PST` (`02:30` + `RandomizedDelaySec`) |
+| smoke | `queue status` + `queue drain` (dry) from `/opt`, then one real item: `ok … 14 717 ms`, `workers 1` |
+| instances | `deepseek-harness` and `deepseek-harness-varad` both `active` during and after |
+
+The oneshot needs three env values beyond `EnvironmentFile`:
 
 ```
+Environment=COGNEE_MEMORY_API_BASE_URL=http://10.20.10.15:8000/api/v1
+Environment=COGNEE_QUEUE_ENDPOINTS=cognee=http://10.20.10.15:8000/api/v1,cognee-2=http://10.20.10.15:8000/api/v1
+Environment=COGNEE_PII_ENABLED=false
+```
+
+`COGNEE_MEMORY_API_BASE_URL` is the *settings* env name the CLI reads.
+`COGNEE_BASE_URL` (the MCP servers' variable) is ignored: without the settings
+name the drain falls back to `http://127.0.0.1:8000` and retries forever — that
+was observed on the first deploy, together with a silent early exit caused by
+retry sleeps whose timer is `unref`'d. Both are fixed (`drain.ts` keep-alive;
+`README`/unit). `COGNEE_PII_ENABLED=false` is the 1.0.3 default (LLM PII pass
+off); the deterministic shaped-secret scrub still runs unconditionally.
+
+Manual run, same env as the unit:
+
+```bash
 systemctl enable --now dsh-cognify-queue.timer
 systemctl list-timers dsh-cognify-queue.timer
+systemctl start dsh-cognify-queue.service   # trigger the nightly job now
 ```
 
-## Two endpoints
+## Deployed backfill — full Mac history (2026-11-24)
 
-Two workers were exercised against **one** Cognee endpoint (39/39 split), which
-proves the concurrency plumbing. A genuinely second model endpoint is not
-available today; see the endpoint findings in the run report — the GGUF host has
-a free GPU, but the second instance was not started, so the per-endpoint config is
-verified by unit test rather than by a live second GPU.
+| metric | value |
+| --- | --- |
+| source | Mac `~/.dsh/sessions` (read-only), 682 sessions |
+| enqueued | **247 unique items** (250 produced, 3 content-hash duplicates; 614 too long, 3 753 not human) |
+| target | `varad` instance project scope — dataset `dsh-project-varad-mac-history-5c5a11e6b8d6859e32a4` (`c74cc337-4d0c-5ac9-b85f-8d6560be37a1`) |
+| workers | 2, two aliases of the **single** Cognee endpoint (123 / 122 split) |
+| wall time | **3 106 433 ms = 51 m 46 s** (12.6 s/item wall) — projection was 34 min |
+| outcome | **245 done** on first attempt, 2 terminal failures, 0 `inflight` left |
+| failures | 2 items whose text *begins* with `http(s)://`: Cognee answers `403` (it treats the payload as an external URL), 6 attempts each → terminal `failed`. Re-enqueued with a `url: ` prefix and drained: both `done`, so 247 of 249 items ingested |
+| retries | 12 failed attempts total, all from those 2 items; no transient retry on the 245 successes |
+| records | **254** in the dataset (9 pre-existing + 245 new; 2 items deduplicated at write time) |
+| redaction | PII pass off, shaped-secret scrub on (0 credential hits reported by the drain) |
+
+Verification after the drain: 5 stored records sampled across the corpus were
+re-retrieved through `CHUNKS` (ranks 1/1/1/2/3, scores 0.75–1.00), and 5 sampled
+facts came back verbatim from the varad instance's `memory_recall`. A fresh
+tools-off headless turn (one message, extraction off) answered "which branch and
+constraint scoped the Task 1 baseline audit" with
+`codex/auth-persistence-baseline` + "audit only, no commits" — a fact from an
+older Mac conversation, injected through `Known context` without any tool call.
+
+## Two workers, one endpoint
+
+Two workers ran against **one** Cognee endpoint for the whole backfill (123/122
+split), so the concurrency plumbing is exercised at real volume. A second GPU is
+not available: `10.20.10.40:8888` is the only Unsloth endpoint, and starting a
+second instance would not add throughput for *cognify*, which is Cognee-side.
+The ~34 min projection assumed the pilot's 8.2 s/item; measured was 12.6 s/item,
+so treat projections from a 78-item sample as optimistic for a 247-item run.
