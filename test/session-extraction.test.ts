@@ -6,10 +6,18 @@ import { createFakePluginContext } from './helpers/fake-context.js'
 function harness() {
   const fake = createFakePluginContext()
   const turns: ExtractionTurnInput[] = []
+  const journaled: unknown[] = []
   const dispose = registerSessionExtraction(fake.ctx, {
     extraction: {
       async handleTurn(input) {
         turns.push(input)
+      },
+    },
+    journal: {
+      enabled: true,
+      recordTurn(input) {
+        journaled.push(input)
+        return { added: input.messages.length, duplicates: 0, skipped: 0 }
       },
     },
   })
@@ -23,7 +31,7 @@ function harness() {
       if (entry.name === name) await (entry.listener(...(args as never[])) as Promise<void>)
     }
   }
-  return { fake, turns, emit, emitAsync, dispose }
+  return { fake, turns, journaled, emit, emitAsync, dispose }
 }
 
 const session = { id: 'session-a', header: { agentPreset: 'worker' } }
@@ -203,5 +211,71 @@ describe('committed session extraction hook', () => {
     const started = Date.now()
     await emitAsync('agent/turn-stopping', { agent: session, turn: 9 })
     expect(Date.now() - started).toBeLessThan(500)
+  })
+})
+
+describe('turn journal hook', () => {
+  it('journals both sides of a committed turn exactly once', async () => {
+    const h = harness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 4 })
+    h.emit('session/event', session, {
+      type: 'user/message',
+      turn: 4,
+      seq: 1,
+      message: userMessage('Why is the timer at 04:00?'),
+    })
+    h.emit('session/event', session, {
+      type: 'assistant/message',
+      turn: 4,
+      seq: 2,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Because the drain runs after the Mac is idle.' }] },
+    })
+    // Live envelopes put the message under data.message and mark the source
+    // "model"; both must journal identically.
+    h.emit('session/event', session, {
+      type: 'assistant/message',
+      turn: 4,
+      seq: 3,
+      data: {
+        turn: 4,
+        step: 2,
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'internal' },
+            { type: 'text', text: 'It runs after the Mac is idle.' },
+          ],
+          source: { kind: 'model' },
+        },
+      },
+    })
+    h.emit('session/event', session, { type: 'turn/end', turn: 4 })
+    await Promise.resolve()
+    expect(h.journaled).toHaveLength(1)
+    expect(h.journaled[0]).toMatchObject({
+      sessionId: 'session-a',
+      turn: 4,
+      messages: [
+        { role: 'user', text: 'Why is the timer at 04:00?', seq: 1 },
+        { role: 'assistant', text: 'Because the drain runs after the Mac is idle.', seq: 2 },
+        { role: 'assistant', text: 'It runs after the Mac is idle.', seq: 3 },
+      ],
+    })
+    // The turn-stopping fallback must not append the same turn twice.
+    await h.emitAsync('agent/turn-stopping', { agent: session, turn: 4 })
+    expect(h.journaled).toHaveLength(1)
+  })
+
+  it('does not journal reasoning or tool payloads as answers', async () => {
+    const h = harness()
+    h.emit('session/event', session, { type: 'turn/start', turn: 1 })
+    h.emit('session/event', session, {
+      type: 'assistant/message',
+      turn: 1,
+      seq: 1,
+      message: { role: 'assistant', content: [{ type: 'reasoning', text: 'thinking hard' }] },
+    })
+    h.emit('session/event', session, { type: 'turn/end', turn: 1 })
+    expect(h.journaled).toHaveLength(0)
   })
 })

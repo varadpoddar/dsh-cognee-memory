@@ -83,3 +83,23 @@ false` and every built-in tool disabled:
 
 Evidence: `/home/varad/first-turn.jsonl` on CT 103 (and
 `/home/varad/patch-no-tools.yml`).
+
+## 2026-11-24 (later): 1.0.4, turn journal, scope alignment
+
+- `dsh.nomad.opsc.io` now serves this instance: unit takes
+  `--public-url https://dsh.nomad.opsc.io/ --trusted-host dsh.nomad.opsc.io`,
+  nftables admits 3081 from Traefik only, Traefik upstream is `10.20.10.12:3081`.
+  Verified by token ownership (varad 200 / dsh 401).
+- Plugin 1.0.4 is installed in **both** profiles (`web`, `headless`), and
+  `ingestion.journal.enabled: true` is set in both: every conversation part
+  (user + agent) becomes a durable task, ingested by the 04:00 drain and deleted
+  only after a complete ingest (`docs/TURN_JOURNAL.md`).
+- Scope bug fixed: the `web` profile pointed at `varad/project/e2e`
+  (`dsh-project-varad-project-e2e-d5ebb55aad47c7723684`) while the backfilled
+  history is in `dsh-project-varad-mac-history-5c5a11e6b8d6859e32a4`. Both
+  profiles now name `projectId: varad/mac-history`, so the public GUI recalls the
+  backfilled corpus.
+- Live proof: one headless turn produced 2 pending tasks, `queue drain --apply`
+  ingested both (`ok 2`, 11.2 s) and pruned them; the queue then held only one
+  permanent failure (`403` URL-leading payload, attempts 6, `permanent: true`).
+

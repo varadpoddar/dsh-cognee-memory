@@ -21,6 +21,8 @@ import { registerSessionExtraction } from './hooks/session-events.js'
 import { MEMORY_POLICY_SECTION } from './hooks/prompt-context.js'
 import { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycle.js'
 import { ExtractionService } from './memory/extraction-service.js'
+import { IngestQueue } from './queue/store.js'
+import { TurnJournal, journalQueuePath } from './memory/turn-journal.js'
 import { RecallVerificationLedger } from './memory/recall-verification.js'
 import { buildInspection } from './settings/inspect.js'
 import { ProvenanceIndex, resolveProvenancePath, type ProvenanceAccess } from './memory/provenance-index.js'
@@ -208,9 +210,29 @@ export function apply(
   // Automatic extraction runs independently of tools. It watches the
   // post-commit session feed, so `tools.enabled: false` changes nothing here.
   const extraction = new ExtractionService({ coordinator, config, metrics })
+
+  // Turn journal: the conversation itself (both sides) becomes durable queued
+  // tasks, ingested by the nightly drain and removed only after a full ingest.
+  const journalQueue = config.ingestion.journal.enabled
+    ? IngestQueue.open({
+        filePath: journalQueuePath(config, process.env),
+        syncWrites: config.ingestion.queue.syncWrites,
+        backoff: {
+          baseMs: config.ingestion.queue.baseBackoffMs,
+          capMs: config.ingestion.queue.maxBackoffMs,
+          maxAttempts: config.ingestion.queue.maxAttempts,
+        },
+        tombstoneRetentionMs: config.ingestion.queue.tombstoneRetentionDays * 86_400_000,
+      })
+    : undefined
+  const journal =
+    journalQueue === undefined
+      ? undefined
+      : new TurnJournal({ config, queue: journalQueue, env: process.env, metrics })
   disposers.push(
     registerSessionExtraction(ctx, {
       extraction,
+      ...(journal === undefined ? {} : { journal }),
       metrics,
       settleMs: config.extraction.llm.settleMs,
     }),
@@ -232,6 +254,7 @@ export function apply(
       identity: {},
       defaultWriteScope: config.scopes.defaultWriteScope,
       extraction,
+      ...(journalQueue === undefined ? {} : { queue: journalQueue }),
       ...(adapter.inventory === undefined
         ? {}
         : { inventory: () => adapter.inventory?.() ?? Promise.resolve(undefined) }),

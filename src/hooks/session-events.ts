@@ -1,4 +1,5 @@
 import type { ExtractionService } from '../memory/extraction-service.js'
+import type { JournalMessage, TurnJournal } from '../memory/turn-journal.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type { PluginContextLike } from '../types.js'
 
@@ -23,6 +24,8 @@ interface TurnMessage {
 interface TurnBucket {
   readonly turn: number
   readonly messages: TurnMessage[]
+  /** Agent text answers; the journal records these, extraction never does. */
+  readonly answers: TurnMessage[]
 }
 
 interface TurnStoppingPayload {
@@ -59,6 +62,29 @@ function textFromMessage(message: unknown): string {
   return text.length > 2_000 ? '' : text
 }
 
+/**
+ * Agent-answer text. Only `text` blocks count: reasoning and tool payloads are
+ * not part of the conversation the user saw, and the journal stores exactly
+ * what was shown.
+ */
+function textFromAnswer(message: unknown): string {
+  if (message === null || typeof message !== 'object') return ''
+  const source = (message as { readonly source?: { readonly kind?: unknown } }).source
+  // Live envelopes use source.kind "model"; test doubles may say "assistant".
+  if (source !== undefined && source.kind !== undefined && source.kind !== 'model' && source.kind !== 'assistant') {
+    return ''
+  }
+  const content = (message as { readonly content?: unknown }).content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const typed = block as { readonly type?: unknown; readonly text?: unknown }
+    if (typed.type === 'text' && typeof typed.text === 'string') parts.push(typed.text)
+  }
+  return parts.join('\n').trim()
+}
+
 function sessionIdOf(session: SessionLike): string | undefined {
   const id = session.id
   return typeof id === 'string' ? id : typeof id === 'number' ? String(id) : undefined
@@ -74,6 +100,8 @@ export function registerSessionExtraction(
   ctx: PluginContextLike,
   deps: {
     readonly extraction: Pick<ExtractionService, 'handleTurn'>
+    /** Optional turn journal: every conversation part becomes a durable task. */
+    readonly journal?: Pick<TurnJournal, 'enabled' | 'recordTurn'>
     readonly metrics?: Metrics
     /**
      * Upper bound on how long the serial turn boundary waits for extraction
@@ -85,6 +113,36 @@ export function registerSessionExtraction(
 ): () => void {
   const buckets = new Map<string, TurnBucket>()
   const sessions = new Map<string, SessionLike>()
+  /** Session+turn already written to the journal, so the fallback cannot duplicate. */
+  const journaled = new Set<string>()
+
+  /**
+   * Append this turn's conversation parts to the durable queue. Synchronous on
+   * purpose: the append is fsynced, so once the turn is committed on disk the
+   * task is on disk too. Failures never break the turn.
+   */
+  const journalTurn = (sessionId: string, turn: number, bucket: TurnBucket): void => {
+    const journal = deps.journal
+    if (journal === undefined || !journal.enabled) return
+    const key = `${sessionId}:${turn}`
+    if (journaled.has(key)) return
+    journaled.add(key)
+    const toMessage = (role: 'user' | 'assistant') => (entry: TurnMessage): JournalMessage => ({
+      role,
+      text: entry.text,
+      ...(entry.seq === undefined ? {} : { seq: entry.seq }),
+    })
+    const messages: JournalMessage[] = [
+      ...bucket.messages.map(toMessage('user')),
+      ...bucket.answers.map(toMessage('assistant')),
+    ]
+    if (messages.length === 0) return
+    try {
+      journal.recordTurn({ sessionId, turn, messages, recordedAt: new Date().toISOString() })
+    } catch {
+      deps.metrics?.increment('journal.failed')
+    }
+  }
 
   const onSessionEvent = (session: SessionLike, event: SessionEventLike): void => {
     try {
@@ -100,18 +158,18 @@ export function registerSessionExtraction(
             ? data.turn
             : undefined
       if (event.type === 'turn/start') {
-        buckets.set(sessionId, { turn: payloadTurn ?? 0, messages: [] })
+        buckets.set(sessionId, { turn: payloadTurn ?? 0, messages: [], answers: [] })
         return
       }
       if (event.type === 'user/message') {
         // The committed log envelope puts the message under `data`; accept the
         // flat test shape as well so unit doubles stay readable.
-        const text = textFromMessage(event.message ?? data)
+        const text = textFromMessage(event.message ?? (isRecord(data) && data.message !== undefined ? data.message : data))
         if (text === '') return
         deps.metrics?.increment('extraction.userMessages')
         let bucket = buckets.get(sessionId)
         if (bucket === undefined) {
-          bucket = { turn: payloadTurn ?? 0, messages: [] }
+          bucket = { turn: payloadTurn ?? 0, messages: [], answers: [] }
           buckets.set(sessionId, bucket)
         }
         bucket.messages.push({
@@ -120,10 +178,27 @@ export function registerSessionExtraction(
         })
         return
       }
+      if (event.type === 'assistant/message') {
+        const text = textFromAnswer(event.message ?? (isRecord(data) && data.message !== undefined ? data.message : data))
+        if (text === '') return
+        deps.metrics?.increment('journal.answers')
+        let bucket = buckets.get(sessionId)
+        if (bucket === undefined) {
+          bucket = { turn: payloadTurn ?? 0, messages: [], answers: [] }
+          buckets.set(sessionId, bucket)
+        }
+        bucket.answers.push({
+          text,
+          ...(typeof event.seq === 'number' ? { seq: event.seq } : {}),
+        })
+        return
+      }
       if (event.type === 'turn/end') {
         const bucket = buckets.get(sessionId)
         buckets.delete(sessionId)
-        if (bucket === undefined || bucket.messages.length === 0) return
+        if (bucket === undefined) return
+        journalTurn(sessionId, bucket.turn, bucket)
+        if (bucket.messages.length === 0) return
         const preset = session.header?.agentPreset
         void deps.extraction
           .handleTurn({
@@ -170,6 +245,9 @@ export function registerSessionExtraction(
     if (sessionId === undefined) return
     const bucket = buckets.get(sessionId)
     const preset = session.header?.agentPreset
+    if (bucket !== undefined) {
+      journalTurn(sessionId, typeof payload.turn === 'number' ? payload.turn : bucket.turn, bucket)
+    }
     try {
       // Runs after the response is produced. This is the awaited-after-response
       // path that guarantees a one-shot process finishes extraction + ingest.

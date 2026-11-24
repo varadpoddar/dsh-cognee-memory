@@ -217,6 +217,35 @@ Backups written before the 2026-11-24 backfill in
 append-only JSONL; `queue status` folds it, `IngestQueue.compact()` is the only
 truncation.
 
+### Turn journal (conversations as tasks)
+
+`ingestion.journal.enabled: true` makes the plugin append every conversation
+part — your messages and the agent's answers — to `ingest-queue.jsonl` at
+`turn/end`. The 04:00 drain ingests them; a task is deleted only after a
+complete ingest and its hash is kept in `ingest-queue.jsonl.done`. Pending,
+inflight and failed tasks survive restarts and prunes. Design and limits:
+`docs/TURN_JOURNAL.md`.
+
+```bash
+# what is waiting (same numbers as the settings page "Conversation tasks")
+pct exec 103 -- su varad -s /bin/bash -c 'cd /opt/dsh-cognee-memory; set -a; \
+  . /etc/dsh-varad/varad.env; set +a; DSH_HOME=/home/varad/.dsh \
+  node lib/cli/main.js queue status --json'
+
+# drain now (prunes completed tasks at the end)
+pct exec 103 -- su varad -s /bin/bash -c 'cd /opt/dsh-cognee-memory; set -a; \
+  . /etc/dsh-varad/varad.env; set +a; \
+  DSH_HOME=/home/varad/.dsh COGNEE_MEMORY_API_BASE_URL=http://10.20.10.15:8000/api/v1 \
+  node lib/cli/main.js queue drain --apply --workers 2'
+```
+
+The journal writes to the **project scope named in the profile**
+(`scopeDefaults.projectId`). On 2026-11-24 the varad `web` profile still pointed
+at `varad/project/e2e` while the backfilled history lived in
+`dsh-project-varad-mac-history-5c5a11e6b8d6859e32a4`; the public GUI recalled
+neither. Both profiles now name `varad/mac-history`. Check with
+`GET /plugins/cognee-memory/settings.json` → `inspection.scopes.project`.
+
 ## 10. Make the varad instance the default public workspace
 
 `dsh.nomad.opsc.io` is a Traefik route (CT 104) to one plain-HTTP listener on

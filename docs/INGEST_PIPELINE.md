@@ -101,16 +101,17 @@ Three durable spools exist, all append-only JSONL in the instance's DSH home:
 | --- | --- | --- |
 | `$DSH_HOME/cognee-memory/candidates.jsonl` | the plugin after every committed user turn (`CandidateQueue`, mode 0600, capped by `extraction.queue.maxPending`, default 100) | the plugin at activation/turn — i.e. next time that instance runs |
 | `$DSH_HOME/cognee-memory/outbox.jsonl` | failed writes that must be replayed in order | the plugin's outbox flush |
-| `$DSH_HOME/plugins/cognee-memory/ingest-queue.jsonl` | `memory queue enqueue` (backfills, scripted imports) | `dsh-cognify-queue.service` at 04:00, or `memory queue drain --apply` |
+| `$DSH_HOME/plugins/cognee-memory/ingest-queue.jsonl` | `memory queue enqueue` (backfills/imports) **and the turn journal** (`ingestion.journal.enabled`, docs/TURN_JOURNAL.md) | `dsh-cognify-queue.service` at 04:00, or `memory queue drain --apply` |
 
 Turns are therefore journalled to disk before they reach Cognee, and a Cognee
 outage does not lose them: candidates stay pending until the instance runs again,
-queued batch items wait for the timer. Two limits matter: the candidate spool is
-capped (`maxPending` 100 — a full spool rejects new candidates rather than
-growing), and an `ingest-queue` item goes terminal `failed` after 6 attempts, so
-an outage longer than one drain window needs a re-enqueue (idempotent) for those
-items. No CLI command drains `candidates.jsonl`; that spool belongs to the plugin
-process.
+queued batch items wait for the timer. With `ingestion.journal.enabled` the queue also receives every conversation
+part (both sides), and its lifecycle is the durable one: completed tasks are
+pruned, everything else stays. The candidate spool keeps its own cap
+(`maxPending` 100); the ingest queue has none and retries effectively forever
+(`maxAttempts`, permanent refusals excepted). No CLI command drains
+`candidates.jsonl`; that spool belongs to the plugin process. See
+`docs/TURN_JOURNAL.md`.
 
 ## Deployment (2026-11-24)
 
@@ -118,11 +119,11 @@ The CLI is installed and the timer is live:
 
 | item | value |
 | --- | --- |
-| deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.3**, node 22.23.5 |
+| deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.4**, node 22.23.5 |
 | runtime deps | `npm install --omit=dev --legacy-peer-deps` → `zod` only; built `lib/` ships in the tarball |
 | units | `/etc/systemd/system/dsh-cognify-queue.{service,timer}`, `systemd-analyze verify`-clean |
 | timer | **enabled/active**, next `Wed 2026-11-25 04:02:25 PST` (`04:00` + `RandomizedDelaySec`) |
-| smoke | `queue status` + `queue drain` (dry) from `/opt`, then one real item: `ok … 14 717 ms`, `workers 1` |
+| smoke | `queue status` + `queue drain` (dry) from `/opt`, then one real item: `ok … 14 717 ms`, `workers 1`; 1.0.4 journal: 2 tasks (both sides) `ok 2` in 11.2 s, pruned to 0 |
 | instances | `deepseek-harness` and `deepseek-harness-varad` both `active` during and after |
 
 The oneshot needs three env values beyond `EnvironmentFile`:

@@ -1,6 +1,6 @@
 {
   "name": "dsh-cognee-memory",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Persistent Cognee-backed memory for DeepSeek Harness agents: bounded known-context recall with reserved query capacity, memory/remember/forget/status tools, a memory-provenance side panel, and an authenticated settings page.",
   "license": "MIT",
   "type": "module",
@@ -39,6 +39,7 @@
     "docs/DEPLOYMENT.md",
     "docs/RUNBOOK.md",
     "docs/INGEST_PIPELINE.md",
+    "docs/TURN_JOURNAL.md",
     "docs/REDACTION_POLICY.md",
     "docs/BACKFILL_MAC.md",
     "README.md",

@@ -16,7 +16,20 @@
  * mid-drain resumes instead of losing work or double-counting it as done.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { MemoryScope } from '../types.js'
@@ -35,6 +48,9 @@ export interface QueueSource {
   readonly role?: 'user' | 'assistant' | 'system'
   readonly timestamp?: string
   readonly projectId?: string
+  /** Part index and count when one long message was split into tasks. */
+  readonly partIndex?: number
+  readonly partOf?: number
 }
 
 /** One queued unit of ingest. */
@@ -52,6 +68,12 @@ export interface QueueItem {
   readonly updatedAt: string
   readonly lastError?: string
   readonly endpoint?: string
+  /**
+   * Set when the failure is not retryable (authz, validation, a payload the
+   * backend refuses). The item stays visible as `failed` and is never claimed
+   * again, instead of disappearing or burning a retry every night.
+   */
+  readonly permanent?: boolean
   /** Scope coordinates, so a drain can rebuild the write identity exactly. */
   readonly scopeRef?: { readonly scope: MemoryScope; readonly id: string }
 }
@@ -77,6 +99,14 @@ export interface QueueOptions {
   readonly now?: () => number
   readonly backoff?: BackoffPolicy
   readonly leaseMs?: number
+  /**
+   * `fdatasync` every appended line. On for the turn journal: a power cut must
+   * not cost the last conversation turn (a torn trailing line is skipped by
+   * the fold, which is only safe if the line that was acknowledged is durable).
+   */
+  readonly syncWrites?: boolean
+  /** How long a completed item's hash stays in the dedupe tombstone set. */
+  readonly tombstoneRetentionMs?: number
 }
 
 /** Newest-wins map of the log, plus bookkeeping for compaction. */
@@ -94,10 +124,16 @@ function queueLineCount(filePath: string): number {
   }
 }
 
-/** Stable hash over scope and whitespace-normalized text. */
-export function contentHashOf(scope: string, text: string): string {
+/** Stable hash over scope, an optional identity seed, and normalized text. */
+export function contentHashOf(scope: string, text: string, dedupeKey?: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
-  return createHash('sha256').update(`${scope}\u0000${normalized}`).digest('hex')
+  const seed = dedupeKey === undefined || dedupeKey === '' ? '' : `${dedupeKey}\u0000`
+  return createHash('sha256').update(`${scope}\u0000${seed}${normalized}`).digest('hex')
+}
+
+/** Sleep without a timer handle, so a sync lock wait cannot outlive the caller. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
 export function resolveQueuePath(env: NodeJS.ProcessEnv = process.env): string {
@@ -159,6 +195,12 @@ export interface EnqueueEntry {
   readonly scope: string
   readonly source?: QueueSource
   readonly scopeRef?: { readonly scope: MemoryScope; readonly id: string }
+  /**
+   * Identity seed mixed into the content hash. The turn journal uses
+   * `session:turn:seq:role:part` so two identical messages ("continue") stay
+   * two tasks, while a replayed journal line still dedupes.
+   */
+  readonly dedupeKey?: string
 }
 
 export interface EnqueueReport {
@@ -187,8 +229,11 @@ export class IngestQueue {
   private readonly now: () => number
   private readonly backoff: BackoffPolicy
   private readonly leaseMs: number
+  private readonly syncWrites: boolean
+  private readonly tombstoneRetentionMs: number
   private readonly items: Map<string, QueueItem>
   private readonly byHash: Map<string, string>
+  private readonly completedHashes: Map<string, number>
   private lines: number
 
   private constructor(options: QueueOptions, folded: Folded) {
@@ -196,10 +241,35 @@ export class IngestQueue {
     this.now = options.now ?? Date.now
     this.backoff = options.backoff ?? DEFAULT_BACKOFF
     this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS
+    this.syncWrites = options.syncWrites ?? false
+    this.tombstoneRetentionMs = options.tombstoneRetentionMs ?? 30 * 24 * 60 * 60_000
     this.items = folded.items
     this.lines = folded.lines
     this.byHash = new Map()
     for (const item of this.items.values()) this.byHash.set(item.contentHash, item.id)
+    this.completedHashes = new Map()
+    for (const [hash, at] of this.tombstones()) this.completedHashes.set(hash, at)
+  }
+
+  /** Path of the completed-hash tombstone log (kept out of the task list). */
+  get tombstonePath(): string {
+    return `${this.filePath}.done`
+  }
+
+  private tombstones(): Array<[string, number]> {
+    if (!existsSync(this.tombstonePath)) return []
+    const entries: Array<[string, number]> = []
+    try {
+      for (const line of readFileSync(this.tombstonePath, 'utf8').split('\n')) {
+        if (line.trim() === '') continue
+        const record = JSON.parse(line) as { hash?: unknown; at?: unknown }
+        if (typeof record.hash !== 'string') continue
+        entries.push([record.hash, typeof record.at === 'number' ? record.at : 0])
+      }
+    } catch {
+      return []
+    }
+    return entries
   }
 
   /**
@@ -215,8 +285,56 @@ export class IngestQueue {
     return queue
   }
 
+  /**
+   * Take the cross-process writer lock. The journal (web process) and the
+   * nightly drainer (CLI) both append and the drainer rewrites the log when it
+   * prunes; a lock is what keeps a prune from discarding a concurrent append.
+   */
+  private withLock<T>(fn: () => T): T {
+    const lockPath = `${this.filePath}.lock`
+    const deadline = Date.now() + 5_000
+    for (;;) {
+      try {
+        const fd = openSync(lockPath, 'wx', 0o600)
+        closeSync(fd)
+        break
+      } catch {
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 30_000) {
+            unlinkSync(lockPath)
+            continue
+          }
+        } catch {
+          // Lock disappeared between the failed open and stat: retry.
+        }
+        if (Date.now() >= deadline) throw new Error(`queue lock timeout: ${lockPath}`)
+        sleepSync(25)
+      }
+    }
+    try {
+      return fn()
+    } finally {
+      try {
+        unlinkSync(lockPath)
+      } catch {
+        // Another process already removed a stale lock.
+      }
+    }
+  }
+
   private append(item: QueueItem): void {
-    appendFileSync(this.filePath, `${JSON.stringify(item)}\n`, { encoding: 'utf8', mode: 0o600 })
+    const line = `${JSON.stringify(item)}\n`
+    if (this.syncWrites) {
+      const fd = openSync(this.filePath, 'a', 0o600)
+      try {
+        writeSync(fd, line)
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+    } else {
+      appendFileSync(this.filePath, line, { encoding: 'utf8', mode: 0o600 })
+    }
     this.lines += 1
     this.items.set(item.id, item)
   }
@@ -241,11 +359,12 @@ export class IngestQueue {
     let added = 0
     let duplicates = 0
     const stamp = new Date(this.now()).toISOString()
+    const pendingItems: QueueItem[] = []
     for (const entry of entries) {
       const text = entry.text.trim()
       if (text === '') continue
-      const contentHash = contentHashOf(entry.scope, text)
-      if (this.byHash.has(contentHash)) {
+      const contentHash = contentHashOf(entry.scope, text, entry.dedupeKey)
+      if (this.byHash.has(contentHash) || this.completedHashes.has(contentHash)) {
         duplicates += 1
         continue
       }
@@ -264,11 +383,16 @@ export class IngestQueue {
         updatedAt: stamp,
       }
       if (options.dryRun !== true) {
-        this.append(item)
+        pendingItems.push(item)
         this.byHash.set(contentHash, id)
       }
       ids.push(id)
       added += 1
+    }
+    if (pendingItems.length > 0) {
+      this.withLock(() => {
+        for (const item of pendingItems) this.append(item)
+      })
     }
     return { added, duplicates, ids }
   }
@@ -282,7 +406,12 @@ export class IngestQueue {
     const due: QueueItem[] = []
     for (const item of this.items.values()) {
       if (item.state === 'pending' && item.nextAttemptAt <= now) due.push(item)
-      else if (item.state === 'failed' && item.nextAttemptAt <= now && item.attempts < this.backoff.maxAttempts) {
+      else if (
+        item.state === 'failed' &&
+        item.permanent !== true &&
+        item.nextAttemptAt <= now &&
+        item.attempts < this.backoff.maxAttempts
+      ) {
         due.push(item)
       }
       if (due.length >= limit) break
@@ -313,10 +442,16 @@ export class IngestQueue {
     this.maybeCompact()
   }
 
-  /** Record a failure; terminal after `maxAttempts`, otherwise scheduled backoff. */
-  markFailed(id: string, error: string): void {
+  /**
+   * Record a failure. Retryable errors go back to `pending` with exponential
+   * backoff and, when `maxAttempts` is Infinity, retry forever. Permanent
+   * errors (authz/validation/a payload the backend refuses) stay visible as
+   * `failed` and are never claimed again.
+   */
+  markFailed(id: string, error: string, options: { readonly permanent?: boolean } = {}): void {
+    const permanent = options.permanent === true
     this.transition(id, (item) => {
-      const terminal = item.attempts >= this.backoff.maxAttempts
+      const terminal = permanent || item.attempts >= this.backoff.maxAttempts
       const updatedAt = new Date(this.now()).toISOString()
       return {
         ...item,
@@ -324,9 +459,44 @@ export class IngestQueue {
         lastError: error.slice(0, 300),
         nextAttemptAt: terminal ? 0 : this.now() + backoffDelayMs(item.attempts, this.backoff),
         updatedAt,
+        ...(permanent ? { permanent: true } : {}),
       }
     })
     this.maybeCompact()
+  }
+
+  /**
+   * Remove fully-ingested tasks from the log and remember their hashes so a
+   * replay stays idempotent. This is the "removed only once completely
+   * ingested" half of the task lifecycle: pending, inflight and failed rows
+   * survive, `done` rows do not.
+   */
+  pruneDone(): { readonly removed: number; readonly remaining: number } {
+    const done = [...this.items.values()].filter((item) => item.state === 'done')
+    if (done.length === 0) return { removed: 0, remaining: this.items.size }
+    this.withLock(() => {
+      const stamp = this.now()
+      for (const item of done) {
+        this.completedHashes.set(item.contentHash, stamp)
+        this.items.delete(item.id)
+        this.byHash.delete(item.contentHash)
+      }
+      const body = [...this.items.values()].map((item) => JSON.stringify(item)).join('\n')
+      const temporary = `${this.filePath}.tmp-${process.pid}`
+      writeFileSync(temporary, body === '' ? '' : `${body}\n`, { encoding: 'utf8', mode: 0o600 })
+      renameSync(temporary, this.filePath)
+      this.lines = this.items.size
+      const cutoff = stamp - this.tombstoneRetentionMs
+      const kept = [...this.completedHashes.entries()].filter((entry) => entry[1] >= cutoff)
+      this.completedHashes.clear()
+      for (const [hash, at] of kept) this.completedHashes.set(hash, at)
+      writeFileSync(
+        this.tombstonePath,
+        kept.map(([hash, at]) => JSON.stringify({ hash, at })).join('\n') + (kept.length === 0 ? '' : '\n'),
+        { encoding: 'utf8', mode: 0o600 },
+      )
+    })
+    return { removed: done.length, remaining: this.items.size }
   }
 
   private transition(id: string, update: (item: QueueItem) => QueueItem): void {
@@ -347,7 +517,7 @@ export class IngestQueue {
     const now = this.now()
     for (const item of this.items.values()) {
       counts[item.state] += 1
-      if (item.state === 'pending' || item.state === 'failed') {
+      if (item.state === 'pending' || (item.state === 'failed' && item.permanent !== true)) {
         if (item.nextAttemptAt <= now) dueNow += 1
         else if (next === undefined || item.nextAttemptAt < next) next = item.nextAttemptAt
         if (item.state === 'pending' && (oldestPending === undefined || item.createdAt < oldestPending)) {

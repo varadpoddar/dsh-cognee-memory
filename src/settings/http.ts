@@ -201,6 +201,27 @@ function renderInspection(
   <table><thead><tr><th>Scope</th><th>Id</th><th>Dataset</th></tr></thead><tbody>${scopes}</tbody></table>
   <h2>Candidate / write queue</h2>
   <table><thead><tr><th>State</th><th>Op</th><th>Dataset</th><th>Attempts</th><th>Reason</th><th>Preview</th></tr></thead><tbody>${operationRows}</tbody></table>
+  ${inspection.tasks === undefined ? '' : `<h2>Conversation tasks</h2>
+  <p class="hint">${inspection.tasks.pending} pending · ${inspection.tasks.inflight} in flight · ${inspection.tasks.failed} failed · ${inspection.tasks.dueNow} due now${
+    inspection.tasks.oldestPendingAt === undefined
+      ? ''
+      : ` · oldest ${escapeHtml(inspection.tasks.oldestPendingAt)}`
+  }. Both sides of a conversation are queued; a task is deleted only after it is fully ingested.</p>
+  <table><thead><tr><th>State</th><th>Role</th><th>Attempts</th><th>Session / turn</th><th>Preview</th></tr></thead><tbody>${
+    inspection.tasks.rows.length === 0
+      ? '<tr><td colspan="5">No conversation tasks queued.</td></tr>'
+      : inspection.tasks.rows
+          .map(
+            (task) => `<tr>
+  <td>${escapeHtml(task.state)}</td>
+  <td>${escapeHtml(task.role)}</td>
+  <td>${task.attempts}</td>
+  <td>${escapeHtml(task.sessionId === undefined ? '—' : `${task.sessionId.slice(0, 8)}… / ${task.turn ?? '—'}`)}</td>
+  <td>${escapeHtml(task.preview)}</td>
+</tr>`,
+          )
+          .join('')
+  }</tbody></table>`}
   <h2>Datasets</h2>
   <table><thead><tr><th>Dataset</th><th>Records</th><th>State</th></tr></thead><tbody>${datasets}</tbody></table>
   <h2>Memories</h2>

@@ -113,6 +113,41 @@ export const CogneeMemoryConfigSchema = z
       .object({
         timeoutMs: z.number().int().min(500).max(900_000).default(180_000),
         pollMs: z.number().int().min(50).max(30_000).default(500),
+        /**
+         * Turn journal: every text part of a conversation (your messages and,
+         * with `includeAssistant`, the agent's answers) is appended to the
+         * durable ingest queue as its own task. The nightly drain ingests
+         * them and removes a task only after a complete ingest, so pending,
+         * in-flight and failed work survives a crash or a power cut.
+         * Off by default: an existing deployment changes behaviour only when
+         * the operator asks for it.
+         */
+        journal: z
+          .object({
+            enabled: z.boolean().default(false),
+            includeAssistant: z.boolean().default(true),
+            /** Long messages are split at this size; nothing is dropped. */
+            chunkChars: z.number().int().min(500).max(50_000).default(8_000),
+            /** Scrub shaped secrets before the text ever touches disk. */
+            redactAtEnqueue: z.boolean().default(true),
+            /** Defaults to `scopes.defaultWriteScope`. */
+            scope: z.enum(['agent', 'user', 'project', 'team']).optional(),
+          })
+          .prefault({}),
+        /** Ingest-queue lifecycle shared by the journal and the nightly drain. */
+        queue: z
+          .object({
+            path: nonEmpty.optional(),
+            /** fdatasync each append: a power cut must not lose an acknowledged turn. */
+            syncWrites: z.boolean().default(true),
+            baseBackoffMs: z.number().int().min(10).max(600_000).default(30_000),
+            maxBackoffMs: z.number().int().min(100).max(3_600_000).default(3_600_000),
+            /** No practical limit: a backlog waits instead of being abandoned. */
+            maxAttempts: z.number().int().min(1).max(1_000_000).default(1_000_000),
+            /** How long a completed task's hash stays for replay idempotency. */
+            tombstoneRetentionDays: z.number().int().min(1).max(3_650).default(30),
+          })
+          .prefault({}),
       })
       .prefault({}),
 

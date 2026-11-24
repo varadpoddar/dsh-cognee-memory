@@ -11,6 +11,7 @@
  * the same queue file, and it stops as soon as `shouldStop()` flips.
  */
 import type { IngestQueue, QueueItem } from './store.js'
+import { MemoryError } from '../errors.js'
 
 /** One write destination: an authenticated client bound to an endpoint. */
 export interface DrainTarget {
@@ -85,7 +86,12 @@ export async function drainQueue(options: DrainOptions): Promise<DrainSummary> {
       } catch (error) {
         failed += 1
         const message = error instanceof Error ? error.message : String(error)
-        options.queue.markFailed(item.id, message)
+        // A refused payload (authz/validation/4xx) will never succeed: keep it
+        // visible as failed instead of retrying it every night forever.
+        const permanent =
+          error instanceof MemoryError &&
+          ['FORBIDDEN', 'VALIDATION', 'UNAUTHORIZED', 'NOT_FOUND', 'UNSUPPORTED_OPERATION'].includes(error.code)
+        options.queue.markFailed(item.id, message, { permanent })
         options.onEvent?.({ type: 'failed', id: item.id, target: target.name, error: message })
       }
     }

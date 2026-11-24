@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.4 — 2026-11-24
+
+Turn journal: conversations become durable tasks with a completed-only-removal
+lifecycle. Opt-in (`ingestion.journal.enabled`); no behaviour change when off.
+
+- Every committed turn appends both sides (user text + agent text answers) to
+  `ingest-queue.jsonl` as one task per message part, chunked at `chunkChars`
+  (nothing truncated). Identity is seeded with `session:turn:seq:role:part`, so
+  repeated "continue" turns stay distinct and replays dedupe.
+- Lifecycle: `done` tasks are pruned at the end of a drain and their hashes kept
+  in `ingest-queue.jsonl.done` for replay idempotency; pending, inflight and
+  failed tasks survive restarts and prunes. Unlimited retries (1 h cap);
+  permanent refusals are marked `permanent` and stay visible instead of
+  retrying nightly.
+- Durability: every append is `fdatasync`'d (`ingestion.queue.syncWrites`), and
+  enqueue/prune take a cross-process lock so a journaling web process cannot
+  race the drainer's rewrite.
+- The settings page gains a **Conversation tasks** table (state, role,
+  attempts, session/turn, preview) alongside the candidate queue.
+- Tests: `test/turn-journal.test.ts` (13) plus hook coverage; suite 544 green.
+
 ## 1.0.3 — 2026-11-24
 
 Deployment of the nightly pipeline and the first full-corpus Mac backfill. No

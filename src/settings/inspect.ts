@@ -7,6 +7,7 @@
  * bounded preview on an authenticated page.
  */
 import type { CandidateQueueStatus } from '../memory/candidate-queue.js'
+import type { IngestQueue, QueueItem, QueueStatus } from '../queue/store.js'
 import type { PendingCandidateView } from '../memory/extraction-service.js'
 import type { OutboxStatus } from '../memory/outbox.js'
 import { scopeKey } from '../memory/scopes.js'
@@ -89,6 +90,28 @@ export interface SettingsInspection {
     readonly checkedAt?: string
     readonly degraded?: string
   }
+  /**
+   * Durable conversation tasks (turn journal). Present only when the journal is
+   * enabled, because otherwise there is no queue to show.
+   */
+  readonly tasks?: {
+    readonly total: number
+    readonly pending: number
+    readonly inflight: number
+    readonly failed: number
+    readonly dueNow: number
+    readonly oldestPendingAt?: string
+    readonly rows: ReadonlyArray<{
+      readonly id: string
+      readonly state: QueueItem['state']
+      readonly role: string
+      readonly attempts: number
+      readonly preview: string
+      readonly sessionId?: string
+      readonly turn?: number
+      readonly lastError?: string
+    }>
+  }
   readonly memories: readonly MemoryInspectionRow[]
   readonly stateCounts: Readonly<Record<MemoryInspectionState, number>>
   readonly warnings: readonly string[]
@@ -122,6 +145,8 @@ export interface InspectionDependencies {
     }>
   }
   readonly inventory?: () => Promise<MemoryInventory | undefined>
+  /** Turn-journal queue: the durable conversation tasks waiting for the drain. */
+  readonly queue?: Pick<IngestQueue, 'status' | 'list'>
   readonly verification?: { has(id: string): boolean }
   readonly now?: () => number
   readonly timeoutMs?: number
@@ -251,7 +276,42 @@ export async function buildInspection(dependencies: InspectionDependencies): Pro
   const prefetchSamples = snapshot.samples['prefetch.latencyMs'] ?? { count: 0, p50: 0, p95: 0 }
   const contextSamples = snapshot.samples['context.usage'] ?? { count: 0, p50: 0, p95: 0 }
 
+  const queueStatus: QueueStatus | undefined = dependencies.queue?.status()
+  const queueRows =
+    dependencies.queue === undefined
+      ? undefined
+      : dependencies.queue
+          .list()
+          .filter((item) => item.state !== 'done')
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .slice(0, 50)
+          .map((item) => ({
+            id: item.id,
+            state: item.state,
+            role: item.source.role ?? 'user',
+            attempts: item.attempts,
+            preview: item.text.slice(0, 90),
+            ...(item.source.sessionId === undefined ? {} : { sessionId: item.source.sessionId }),
+            ...(item.source.turnIndex === undefined ? {} : { turn: item.source.turnIndex }),
+            ...(item.lastError === undefined ? {} : { lastError: item.lastError }),
+          }))
+
   return {
+    ...(queueStatus === undefined
+      ? {}
+      : {
+          tasks: {
+            total: queueStatus.total,
+            pending: queueStatus.counts.pending,
+            inflight: queueStatus.counts.inflight,
+            failed: queueStatus.counts.failed,
+            dueNow: queueStatus.dueNow,
+            ...(queueStatus.oldestPendingAt === undefined
+              ? {}
+              : { oldestPendingAt: queueStatus.oldestPendingAt }),
+            rows: queueRows ?? [],
+          },
+        }),
     toggles: {
       autoRecall: status.autoRecall,
       autoWrite: status.autoWrite,

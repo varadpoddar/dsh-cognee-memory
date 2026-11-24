@@ -31,7 +31,13 @@ import {
 } from '../security/pii.js'
 import { drainQueue, type DrainEvent, type DrainSummary, type DrainTarget } from '../queue/drain.js'
 import { collectTranscriptEntries } from '../queue/producer.js'
-import { IngestQueue, resolveQueuePath, type QueueItem, type QueueStatus } from '../queue/store.js'
+import {
+  IngestQueue,
+  resolveQueuePath,
+  type BackoffPolicy,
+  type QueueItem,
+  type QueueStatus,
+} from '../queue/store.js'
 import { createCliRuntime, identityForScope, parseScopeArg } from './runtime.js'
 
 /** Where DSH keeps session transcripts for this home. */
@@ -86,6 +92,31 @@ export function piiOptionsFromEnv(env: NodeJS.ProcessEnv): DetectionOptions | un
   const model = env.COGNEE_PII_MODEL?.trim() || 'unsloth/Qwen3.8-27B-GGUF'
   const apiKey = env.COGNEE_PII_API_KEY?.trim() || env.UNSLOTH_LARGE_API_KEY?.trim()
   return { endpoint, model, ...(apiKey === undefined || apiKey === '' ? {} : { apiKey }) }
+}
+
+/**
+ * Queue lifecycle knobs. Defaults are "wait, do not abandon": unlimited retries
+ * with a 1 h cap, fsync on every append, and completed hashes kept 30 days so a
+ * replay stays idempotent. Override with the COGNEE_QUEUE_* variables.
+ */
+export function queueOptionsFromEnv(env: NodeJS.ProcessEnv): {
+  readonly backoff: BackoffPolicy
+  readonly syncWrites: boolean
+  readonly tombstoneRetentionMs: number
+} {
+  const number = (raw: string | undefined, fallback: number): number => {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+  }
+  return {
+    backoff: {
+      baseMs: number(env.COGNEE_QUEUE_BASE_BACKOFF_MS, 30_000),
+      capMs: number(env.COGNEE_QUEUE_MAX_BACKOFF_MS, 60 * 60_000),
+      maxAttempts: number(env.COGNEE_QUEUE_MAX_ATTEMPTS, 1_000_000),
+    },
+    syncWrites: env.COGNEE_QUEUE_SYNC_WRITES?.trim() !== 'false',
+    tombstoneRetentionMs: number(env.COGNEE_QUEUE_TOMBSTONE_DAYS, 30) * 86_400_000,
+  }
 }
 
 /** Build one writer per endpoint, each with its own adapter and ledger handle. */
@@ -169,7 +200,7 @@ function describeStatus(status: QueueStatus): string {
 /** Entry point for `memory queue <sub>`. */
 export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, io: QueueCommandIo): Promise<number> {
   const sub = args.values['queue-sub'] ?? 'status'
-  const queue = IngestQueue.open({ filePath: resolveQueuePath(env) })
+  const queue = IngestQueue.open({ filePath: resolveQueuePath(env), ...queueOptionsFromEnv(env) })
 
   if (sub === 'status') {
     const status = queue.status()
@@ -251,14 +282,18 @@ export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, i
             },
           }),
     })
+    // A completed task is deleted from the log; only its hash stays (tombstone),
+    // so the list holds exactly the work that is not yet fully ingested.
+    const pruned = queue.pruneDone()
     if (args.flags.has('json')) {
-      io.out(JSON.stringify(summary))
+      io.out(JSON.stringify({ ...summary, pruned }))
       return summary.failed > 0 ? 1 : 0
     }
     io.out(
       `drained: ok ${summary.processed}  failed ${summary.failed}  workers ${Math.min(workers, targets.length)}  ${summary.durationMs}ms`,
     )
     for (const [target, count] of Object.entries(summary.byTarget)) io.out(`  ${target}: ${count}`)
+    io.out(`removed ${pruned.removed} completed task(s); ${pruned.remaining} still queued`)
     return summary.failed > 0 ? 1 : 0
   }
 
