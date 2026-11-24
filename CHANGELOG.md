@@ -50,6 +50,20 @@ instance are untouched.
   verbatim by the varad instance's `memory_recall`; a fresh tools-off single
   message recalled an older Mac conversation's Task 1 branch/constraint.
 
+### Operations (2026-11-24, later same day)
+
+- `dsh.nomad.opsc.io` now serves the **varad** instance: varad's unit takes the
+  public origin (`--public-url https://dsh.nomad.opsc.io/`,
+  `--trusted-host dsh.nomad.opsc.io`), nftables admits 3081 from Traefik only,
+  and the Traefik route points at `10.20.10.12:3081`. Verified by token
+  ownership (varad token 200, dsh token 401). The `dsh` instance is unchanged
+  and still reachable on `10.20.10.12:3080`.
+- Nightly drain moved from 02:30 to **04:00 America/Los_Angeles**
+  (`Persistent=true`, `RandomizedDelaySec=300`; next run 04:02 PST).
+- Documented the disk-first spools (`candidates.jsonl`, `outbox.jsonl`,
+  `ingest-queue.jsonl`), their caps (100 candidates; 6 queue attempts) and who
+  drains each, in `docs/INGEST_PIPELINE.md`; switch + rollback in `docs/RUNBOOK.md` §10.
+
 ## 1.0.2 — 2026-11-23
 
 Profile-layer, service and panel hardening. No Cognee schema migration; memory

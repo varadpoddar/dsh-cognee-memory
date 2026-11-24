@@ -21,7 +21,7 @@ and the lever for cost is batching a drain window, not skipping the graph step.
 | `src/queue/drain.ts` | N workers, one leased item at a time, stop signal |
 | `src/cli/queue-cmd.ts` | `queue enqueue / drain / status` |
 | `src/security/ingest-redaction.ts` | secrets -> PII -> re-scan, applied in the drain write path |
-| `deploy/systemd/*` | nightly 02:30 timer + drain oneshot |
+| `deploy/systemd/*` | nightly 04:00 timer + drain oneshot |
 
 ## Operator surface
 
@@ -85,13 +85,32 @@ the only thing that would move it materially.
 
 ## Scheduling
 
-`dsh-cognify-queue.timer` runs `OnCalendar=*-*-* 02:30:00` with
-`Persistent=true` (a missed night runs once on next boot) and
-`RandomizedDelaySec=300`; the oneshot has `TimeoutStartSec=3h`,
-`TimeoutStopSec=120`, `Nice=10`, `IOSchedulingClass=idle`, and reads
-`/etc/dsh-varad/varad.env` with `DSH_HOME=/home/varad/.dsh`.
+`dsh-cognify-queue.timer` runs `OnCalendar=*-*-* 04:00:00` (host time zone is
+`America/Los_Angeles`, so 04:00 PST/PDT) with `Persistent=true` (a missed night
+runs once on next boot) and `RandomizedDelaySec=300`; the oneshot has
+`TimeoutStartSec=3h`, `TimeoutStopSec=120`, `Nice=10`, `IOSchedulingClass=idle`,
+and reads `/etc/dsh-varad/varad.env` with `DSH_HOME=/home/varad/.dsh`.
 
 `--drain` for a manual run is just `memory queue drain --apply`.
+
+### What is on disk before consolidation
+
+Three durable spools exist, all append-only JSONL in the instance's DSH home:
+
+| file | written by | drained by |
+| --- | --- | --- |
+| `$DSH_HOME/cognee-memory/candidates.jsonl` | the plugin after every committed user turn (`CandidateQueue`, mode 0600, capped by `extraction.queue.maxPending`, default 100) | the plugin at activation/turn — i.e. next time that instance runs |
+| `$DSH_HOME/cognee-memory/outbox.jsonl` | failed writes that must be replayed in order | the plugin's outbox flush |
+| `$DSH_HOME/plugins/cognee-memory/ingest-queue.jsonl` | `memory queue enqueue` (backfills, scripted imports) | `dsh-cognify-queue.service` at 04:00, or `memory queue drain --apply` |
+
+Turns are therefore journalled to disk before they reach Cognee, and a Cognee
+outage does not lose them: candidates stay pending until the instance runs again,
+queued batch items wait for the timer. Two limits matter: the candidate spool is
+capped (`maxPending` 100 — a full spool rejects new candidates rather than
+growing), and an `ingest-queue` item goes terminal `failed` after 6 attempts, so
+an outage longer than one drain window needs a re-enqueue (idempotent) for those
+items. No CLI command drains `candidates.jsonl`; that spool belongs to the plugin
+process.
 
 ## Deployment (2026-11-24)
 
@@ -102,7 +121,7 @@ The CLI is installed and the timer is live:
 | deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.3**, node 22.23.5 |
 | runtime deps | `npm install --omit=dev --legacy-peer-deps` → `zod` only; built `lib/` ships in the tarball |
 | units | `/etc/systemd/system/dsh-cognify-queue.{service,timer}`, `systemd-analyze verify`-clean |
-| timer | **enabled/active**, next `Wed 2026-11-25 02:34:35 PST` (`02:30` + `RandomizedDelaySec`) |
+| timer | **enabled/active**, next `Wed 2026-11-25 04:02:25 PST` (`04:00` + `RandomizedDelaySec`) |
 | smoke | `queue status` + `queue drain` (dry) from `/opt`, then one real item: `ok … 14 717 ms`, `workers 1` |
 | instances | `deepseek-harness` and `deepseek-harness-varad` both `active` during and after |
 

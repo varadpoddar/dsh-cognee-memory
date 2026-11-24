@@ -216,3 +216,53 @@ Backups written before the 2026-11-24 backfill in
 247-item queue) and `ledger.pre-backfill.bak` (ledger snapshot). The queue log is
 append-only JSONL; `queue status` folds it, `IngestQueue.compact()` is the only
 truncation.
+
+## 10. Make the varad instance the default public workspace
+
+`dsh.nomad.opsc.io` is a Traefik route (CT 104) to one plain-HTTP listener on
+CT 103. Switching it from the `dsh` instance (3080) to `varad` (3081) is three
+independent, reversible edits — do them in this order and probe after each:
+
+```bash
+# 1. varad must accept the public Host header, or every request gets 403
+#    (/etc/systemd/system/deepseek-harness-varad.service)
+#      --public-url https://dsh.nomad.opsc.io/
+#      --trusted-host dsh.nomad.opsc.io
+pct exec 103 -- systemctl daemon-reload
+pct exec 103 -- systemctl restart deepseek-harness-varad
+pct exec 103 -- curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: dsh.nomad.opsc.io' http://10.20.10.12:3081/api/health      # 401, not 403
+
+# 2. nftables on CT 103: admit 3081 from Traefik only (mirror the 3080 rule)
+grep -n 'dport 3081' /etc/nftables.conf    # add: ip saddr 10.20.10.13 tcp dport 3081 accept
+pct exec 103 -- nft -f /etc/nftables.conf
+
+# 3. Traefik service upstream (CT 104) — file provider reloads without restart
+sed -i 's#http://10.20.10.12:3080#http://10.20.10.12:3081#' \
+  /etc/traefik/dynamic/dsh.yml
+```
+
+Verify from CT 104 that the public host is served by varad — the settings token
+is instance-specific, so it identifies the backend:
+
+```bash
+T=$(pct exec 103 -- grep -h COGNEE_MEMORY_SETTINGS_TOKEN /etc/dsh-varad/varad.env | cut -d= -f2)
+pct exec 104 -- curl -sk -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $T" \
+  https://dsh.nomad.opsc.io/plugins/cognee-memory/settings.json      # 200 = varad
+```
+
+Also update the varad web profile's `settings.publicBaseUrl` to
+`https://dsh.nomad.opsc.io` (`profiles/web/cordis.patch.yml`) so panel links do
+not point at the LAN-only URL, then restart varad. The per-instance login URL
+and token are printed at startup: `journalctl -u deepseek-harness-varad | grep token`.
+
+**Rollback** is the reverse: restore the three backups (`dsh.yml.bak-<ts>`,
+`nftables.conf.bak-<ts>`, `varad.service.bak-<ts>` from `/root/backups`), reload
+Traefik (automatic) and `nft -f`, `systemctl daemon-reload`, restart varad.
+
+**What moved:** only *memories* (the extracted user turns in Cognee). Session
+transcripts were not copied — the varad GUI starts with an empty conversation
+list and full recall. Copying `sessions/` from the Mac would make old threads
+visible, but their recorded cwd (`/Users/varad/…`) does not exist on CT 103, so
+resuming them would run tools against a missing directory; recall is the
+supported way to continue that history.
