@@ -1,6 +1,6 @@
-# DEPLOYMENT — dsh-cognee-memory 1.0.0 on CT 103
+# DEPLOYMENT — dsh-cognee-memory 1.0.2 on CT 103
 
-Exact commands used for the live deployment and the 1.0.0 fresh-install smoke.
+Exact commands used for the live deployment and the 1.0.2 fresh-install smoke.
 Everything runs on the Proxmox host (`control.nomad.opsc.io`) through
 `pct exec 103`; the harness itself runs inside CT 103 as the unprivileged user
 `dsh`.
@@ -59,19 +59,21 @@ Build and pack on the workstation:
 ```bash
 cd dsh-cognee-memory
 npm ci && npm run build && npm test
-npm pack                       # dsh-cognee-memory-1.0.0.tgz
+npm pack                       # dsh-cognee-memory-1.0.2.tgz
 ```
 
 Copy the tarball into CT 103 and install it into the **service** profile:
 
 ```bash
 # from the Proxmox host
-scp -i ~/.ssh/dsh dsh-cognee-memory-1.0.0.tgz root@control.nomad.opsc.io:/tmp/
-pct push 103 /tmp/dsh-cognee-memory-1.0.0.tgz /var/lib/deepseek-harness/dsh-cognee-memory-1.0.0.tgz
+scp -i ~/.ssh/dsh dsh-cognee-memory-1.0.2.tgz root@control.nomad.opsc.io:/tmp/
+pct push 103 /tmp/dsh-cognee-memory-1.0.2.tgz /var/lib/deepseek-harness/dsh-cognee-memory-1.0.2.tgz
 
 pct exec 103 -- su dsh -s /bin/bash -c '
   DSH_HOME=/var/lib/deepseek-harness/.dsh \
-  dsh plugin --profile web add /var/lib/deepseek-harness/dsh-cognee-memory-1.0.0.tgz
+  dsh plugin --profile web add @deepseek-ai/cordis@4.0.5
+  DSH_HOME=/var/lib/deepseek-harness/.dsh \
+  dsh plugin --profile web add /var/lib/deepseek-harness/dsh-cognee-memory-1.0.2.tgz
 '
 ```
 
@@ -127,10 +129,10 @@ pct exec 103 -- bash -c '
   install -d -o dsh -g dsh -m 0750 /var/lib/deepseek-harness/.dsh-smoke
   su dsh -s /bin/bash -c "
     DSH_HOME=/var/lib/deepseek-harness/.dsh-smoke \
-    dsh plugin --profile smoke add /var/lib/deepseek-harness/dsh-cognee-memory-1.0.0.tgz
+    dsh plugin --profile smoke add /var/lib/deepseek-harness/dsh-cognee-memory-1.0.2.tgz
   "
 '
-# → "dependencies: + dsh-cognee-memory file:…/dsh-cognee-memory-1.0.0.tgz"
+# → "dependencies: + dsh-cognee-memory file:…/dsh-cognee-memory-1.0.2.tgz"
 
 # 1. mount the plugin row and provide the model provider in the smoke patch
 #    (fresh profiles have no row; the real deployment uses the same insert)

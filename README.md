@@ -43,10 +43,13 @@ DSH itself is patched.
 
 ```bash
 # from the repo
-npm pack                                  # → dsh-cognee-memory-1.0.0.tgz
+npm pack                                  # → dsh-cognee-memory-1.0.2.tgz
+
+# Cordis 4.0.5 is a required peer; install the exact runtime version first.
+dsh plugin --profile web add @deepseek-ai/cordis@4.0.5
 
 # install into a profile (here: web); a profile is initialized on first use
-dsh plugin --profile web add ./dsh-cognee-memory-1.0.0.tgz
+dsh plugin --profile web add ./dsh-cognee-memory-1.0.2.tgz
 
 # the composed plugin tree is read at boot — restart once
 systemctl restart deepseek-harness        # or stop/start `dsh web` locally

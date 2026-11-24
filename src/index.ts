@@ -33,7 +33,7 @@ import { createRememberTool } from './tools/remember.js'
 import { createForgetTool } from './tools/forget.js'
 import { createStatusTool } from './tools/status.js'
 import { createCogneeServiceRegistration } from './service/cognee.js'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 
 /** Cordis plugin name. */
 export const name = 'cognee-memory'
@@ -169,11 +169,12 @@ export function apply(
   // surface over the same coordinator the tools and hooks use. Cordis owns the
   // service registration on this plugin's fiber; disposing the fiber removes it
   // with everything else below, so there is no separate manual disposer.
-  void createCogneeServiceRegistration(ctx as unknown as Context, {
-    coordinator,
-    config,
-    metrics,
-  })
+  // Structural test doubles have no reflect registry; the plugin's tools and
+  // hooks still apply there, and the service path is covered against a real
+  // Cordis Context in test/cognee-service.test.ts.
+  if (Context.is(ctx)) {
+    void createCogneeServiceRegistration(ctx, { coordinator, config, metrics })
+  }
 
   const dispose = (): void => {
     if (disposed) return

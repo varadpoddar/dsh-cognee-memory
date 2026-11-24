@@ -57,9 +57,13 @@ describe.skipIf(apiKey === undefined || apiKey === '')('first-turn prefetch (liv
     expect(config.retrieval.maxItems).toBe(8)
   }, 30_000)
 
-  it('returns nothing for a different project scope', async () => {
+  it('does not return another project\'s fixture for a different project scope', async () => {
     const { controller } = controllerFor('dsh/project/other-scope')
     controller.beginPrefetch({ turn: 1, query: QUESTION })
-    expect(await controller.resolveForAssembly({})).toBe('')
+    const block = await controller.resolveForAssembly({})
+    // User/agent scopes are readable by design, so the block need not be empty;
+    // project isolation is proven by the absent project-scoped fixture.
+    expect(block).not.toContain('amber-otter-7731')
+    expect(block).not.toContain('CT 103')
   }, 30_000)
 })
