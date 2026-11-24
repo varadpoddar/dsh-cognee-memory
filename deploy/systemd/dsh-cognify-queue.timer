@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly DSH cognee-memory ingest drain (02:30 local)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# If the host was off at 02:30, run once on the next boot rather than silently
+# skipping a night's backfill.
+Persistent=true
+RandomizedDelaySec=300
+Unit=dsh-cognify-queue.service
+
+[Install]
+WantedBy=timers.target

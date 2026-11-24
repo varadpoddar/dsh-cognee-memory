@@ -20,6 +20,7 @@ import {
   resolveImportStatePath,
 } from './history-import.js'
 import { allowedScopes, createCliRuntime, describeScope, identityForScope, parseScopeArg } from './runtime.js'
+import { runQueue } from './queue-cmd.js'
 import { MemoryError } from '../errors.js'
 
 export interface CliIo {
@@ -47,8 +48,10 @@ const VALUE_FLAGS = new Set([
   'limit',
   'limit-sessions',
   'preview',
+  'workers',
+  'queue-sub',
 ])
-const BOOLEAN_FLAGS = new Set(['apply', 'dry-run', 'json', 'help'])
+const BOOLEAN_FLAGS = new Set(['apply', 'dry-run', 'json', 'help', 'from-sessions', 'drain', 'status'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const command = argv[0] ?? 'help'
@@ -57,6 +60,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index] ?? ''
     if (!arg.startsWith('--')) {
+      // `memory queue <enqueue|drain|status>` takes one positional subcommand.
+      if (command === 'queue' && values['queue-sub'] === undefined) {
+        values['queue-sub'] = arg
+        continue
+      }
       throw new MemoryError('VALIDATION', `unexpected argument: ${arg}`)
     }
     const key = arg.slice(2)
@@ -91,9 +99,12 @@ const HELP = [
   '  import           import a bundle into one authorized scope (dry run by default)',
   '  recall           search one scope and print the records that come back',
   '  remember         write one explicit fact (operator seeding / round-trip proofs)',
+  '  queue            durable ingest queue: enqueue | drain | status',
   '',
   'flags: --scope <name:rawId> --apply --dry-run --json --principal <id>',
   '       import-history: --sessions-dir <dir> --state-file <path> --session <id> --limit-sessions N',
+  '       queue enqueue: --from-sessions --limit-sessions N --limit N --text "<fact>"',
+  '       queue drain:   --workers N --limit N   (endpoints: COGNEE_QUEUE_ENDPOINTS=name=url,...)',
   '       export: --out <path>',
   '       import: --in <path> --allow-scope <name:rawId>[,<name:rawId>]',
   '       recall: --query <text> --limit N',
@@ -332,6 +343,8 @@ export async function runCli(
         return await runRecall(args, env, io)
       case 'remember':
         return await runRemember(args, env, io)
+      case 'queue':
+        return await runQueue(args, env, io)
       default:
         io.err(`unknown command: ${args.command}`)
         io.out(HELP)

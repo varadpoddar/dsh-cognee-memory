@@ -1,0 +1,226 @@
+/**
+ * `memory queue` — operator surface for the durable ingest pipeline.
+ *
+ *   memory queue enqueue --from-sessions [--limit-sessions 20] [--limit 500] [--scope name:id] [--dry-run]
+ *   memory queue enqueue --text "..." [--scope name:id]
+ *   memory queue drain [--workers 2] [--limit 50] [--dry-run] [--json]
+ *   memory queue status [--json]
+ *
+ * Dry run is the default for `enqueue` and `drain`: nothing is written unless
+ * `--apply` is passed, matching every other writing command in this CLI.
+ *
+ * Endpoints: `--workers` is capped by the number of configured targets. Targets
+ * come from `COGNEE_QUEUE_ENDPOINTS` (`name=url,name2=url2`) or, when unset, the
+ * single configured `apiBaseUrl`. That is what lets two workers drive two
+ * model endpoints (one per GPU) without touching the plugin's settings.
+ */
+import { createMemoryAdapter } from '../adapters/memory-adapter.js'
+import { MemoryCoordinator } from '../memory/coordinator.js'
+import { MemoryLedger, resolveLedgerPath } from '../memory/ledger.js'
+import { scopeKey } from '../memory/scopes.js'
+import type { CogneeMemoryConfig } from '../config/schema.js'
+import { MemoryError } from '../errors.js'
+import type { ScopeRef } from '../types.js'
+import { drainQueue, type DrainEvent, type DrainSummary, type DrainTarget } from '../queue/drain.js'
+import { collectTranscriptEntries } from '../queue/producer.js'
+import { IngestQueue, resolveQueuePath, type QueueItem, type QueueStatus } from '../queue/store.js'
+import { createCliRuntime, identityForScope, parseScopeArg } from './runtime.js'
+
+/** Where DSH keeps session transcripts for this home. */
+function defaultSessionsDir(env: NodeJS.ProcessEnv): string {
+  const home = env.DSH_HOME?.trim() || `${env.HOME ?? ''}/.dsh`
+  return `${home}/sessions`
+}
+
+/** Parse `COGNEE_QUEUE_ENDPOINTS` into named base URLs. */
+export function parseEndpointSpecs(raw: string | undefined, fallback: string): { name: string; url: string }[] {
+  const value = raw?.trim()
+  if (value === undefined || value === '') {
+    let name = fallback
+    try {
+      name = new URL(fallback).host
+    } catch {
+      // Keep the raw string as the label.
+    }
+    return [{ name, url: fallback }]
+  }
+  const specs: { name: string; url: string }[] = []
+  for (const part of value.split(',').map((entry) => entry.trim()).filter((entry) => entry !== '')) {
+    const eq = part.indexOf('=')
+    if (eq > 0) {
+      specs.push({ name: part.slice(0, eq).trim(), url: part.slice(eq + 1).trim() })
+      continue
+    }
+    let name = part
+    try {
+      name = new URL(part).host
+    } catch {
+      // Keep the raw string.
+    }
+    specs.push({ name, url: part })
+  }
+  return specs.length === 0 ? [{ name: fallback, url: fallback }] : specs
+}
+
+/** Build one writer per endpoint, each with its own adapter and ledger handle. */
+function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): DrainTarget[] {
+  const specs = parseEndpointSpecs(env.COGNEE_QUEUE_ENDPOINTS, config.apiBaseUrl)
+  return specs.map((spec) => {
+    const endpointConfig: CogneeMemoryConfig = { ...config, apiBaseUrl: spec.url }
+    const adapter = createMemoryAdapter({ config: endpointConfig, env, endpoint: () => spec.url })
+    const ledger = new MemoryLedger({ filePath: resolveLedgerPath(env) })
+    const coordinator = new MemoryCoordinator({
+      adapter,
+      config: endpointConfig,
+      endpoint: () => spec.url,
+      ledger,
+    })
+    return {
+      name: spec.name,
+      write: async (item: QueueItem): Promise<void> => {
+        const ref = item.scopeRef
+        if (ref === undefined) {
+          throw new MemoryError('VALIDATION', 'queue item has no scope reference')
+        }
+        const identity = identityForScope(ref)
+        await coordinator.remember({
+          text: item.text,
+          identity,
+          provenance: {
+            kind: 'import',
+            source: 'ingest-queue',
+            recordedAt: new Date().toISOString(),
+            evidence: 'queue:nightly',
+            ...(item.source.sessionId === undefined ? {} : { sessionId: item.source.sessionId }),
+            ...(item.source.turnIndex === undefined ? {} : { turn: item.source.turnIndex }),
+          },
+        })
+      },
+    }
+  })
+}
+
+export interface QueueCommandIo {
+  readonly out: (line: string) => void
+  readonly err: (line: string) => void
+}
+
+export interface QueueCommandArgs {
+  readonly values: Readonly<Record<string, string>>
+  readonly flags: ReadonlySet<string>
+}
+
+function number(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number.parseInt(value, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function describeStatus(status: QueueStatus): string {
+  const counts = status.counts
+  return [
+    `queue: ${status.filePath}`,
+    `items ${status.total}  pending ${counts.pending}  inflight ${counts.inflight}  done ${counts.done}  failed ${counts.failed}`,
+    `due now ${status.dueNow}${status.nextAttemptAt === undefined ? '' : `  next retry ${status.nextAttemptAt}`}`,
+    `log lines ${status.lines}`,
+  ].join('\n')
+}
+
+/** Entry point for `memory queue <sub>`. */
+export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, io: QueueCommandIo): Promise<number> {
+  const sub = args.values['queue-sub'] ?? 'status'
+  const queue = IngestQueue.open({ filePath: resolveQueuePath(env) })
+
+  if (sub === 'status') {
+    const status = queue.status()
+    if (args.flags.has('json')) {
+      io.out(JSON.stringify(status))
+      return 0
+    }
+    io.out(describeStatus(status))
+    return 0
+  }
+
+  if (sub === 'enqueue') {
+    const scope = parseScopeArg(args.values.scope, createCliRuntime(env).config, env)
+    const entries = [] as ReturnType<typeof collectTranscriptEntries>['entries'][number][]
+    const report = { sessions: 0, missing: false, skipped: { synthetic: 0, tooLong: 0, notHuman: 0 } }
+    if (args.flags.has('from-sessions')) {
+      const produced = collectTranscriptEntries({
+        sessionsDir: args.values['sessions-dir'] ?? defaultSessionsDir(env),
+        scope: scopeKey(scope),
+        ...(args.values['limit-sessions'] === undefined
+          ? {}
+          : { limitSessions: number(args.values['limit-sessions'], 20) }),
+        ...(args.values.limit === undefined ? {} : { limitItems: number(args.values.limit, 500) }),
+      })
+      if (produced.missing) {
+        io.err(`queue: no sessions directory at ${produced.sessionsDir}`)
+        return 1
+      }
+      report.sessions = produced.sessions
+      report.skipped = produced.skipped
+      entries.push(...produced.entries.map((entry) => ({ ...entry, scopeRef: scope })))
+    }
+    const text = args.values.text?.trim()
+    if (text !== undefined && text !== '') {
+      entries.push({ text, scope: scopeKey(scope), scopeRef: scope })
+    }
+    if (entries.length === 0) throw new MemoryError('VALIDATION', 'nothing to enqueue: pass --from-sessions or --text')
+    const apply = args.flags.has('apply')
+    const result = queue.enqueue(entries, { dryRun: !apply })
+    if (args.flags.has('json')) {
+      io.out(JSON.stringify({ ...result, dryRun: !apply, sessions: report.sessions, skipped: report.skipped }))
+      return 0
+    }
+    io.out(
+      `${apply ? 'enqueued' : 'dry run'}: added ${result.added}  duplicates ${result.duplicates}  sessions ${report.sessions}`,
+    )
+    io.out(
+      `skipped: synthetic ${report.skipped.synthetic}  tooLong ${report.skipped.tooLong}  notHuman ${report.skipped.notHuman}`,
+    )
+    if (!apply) io.out('dry run — pass --apply to write')
+    return 0
+  }
+
+  if (sub === 'drain') {
+    const runtime = createCliRuntime(env)
+    const targets = buildTargets(runtime.config, env)
+    const apply = args.flags.has('apply')
+    const limit = args.values.limit === undefined ? undefined : number(args.values.limit, 50)
+    const workers = number(args.values.workers, 2)
+    if (!apply) {
+      const status = queue.status()
+      io.out(`dry run: ${status.dueNow} item(s) due across ${targets.length} endpoint(s): ${targets.map((t) => t.name).join(', ')}`)
+      io.out(`would drain with ${Math.min(workers, targets.length)} worker(s)`)
+      return 0
+    }
+    const events: DrainEvent[] = []
+    const summary: DrainSummary = await drainQueue({
+      queue,
+      targets,
+      workers,
+      ...(limit === undefined ? {} : { limit }),
+      ...(args.flags.has('json')
+        ? {}
+        : {
+            onEvent: (event: DrainEvent) => {
+              events.push(event)
+              if (event.type === 'done') io.out(`  ok   ${event.id} via ${event.target} ${event.ms}ms`)
+              else if (event.type === 'failed') io.err(`  fail ${event.id} via ${event.target}: ${event.error}`)
+            },
+          }),
+    })
+    if (args.flags.has('json')) {
+      io.out(JSON.stringify(summary))
+      return summary.failed > 0 ? 1 : 0
+    }
+    io.out(
+      `drained: ok ${summary.processed}  failed ${summary.failed}  workers ${Math.min(workers, targets.length)}  ${summary.durationMs}ms`,
+    )
+    for (const [target, count] of Object.entries(summary.byTarget)) io.out(`  ${target}: ${count}`)
+    return summary.failed > 0 ? 1 : 0
+  }
+
+  throw new MemoryError('VALIDATION', `unknown queue subcommand: ${sub}`)
+}

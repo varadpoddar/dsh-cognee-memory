@@ -1,0 +1,29 @@
+[Unit]
+Description=DSH cognee-memory ingest queue drain (nightly backfill)
+Documentation=file:///opt/dsh-cognee-memory/docs/INGEST_PIPELINE.md
+# Never let a drain overlap a previous one: two processes writing the same
+# JSONL log would race the lease accounting.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=varad
+Group=varad
+# The queue lives in this instance's DSH home, not the system one.
+Environment=DSH_HOME=/home/varad/.dsh
+EnvironmentFile=/etc/dsh-varad/varad.env
+# One worker per model endpoint. Unset => the single configured apiBaseUrl.
+Environment=COGNEE_QUEUE_ENDPOINTS=gpu0=http://10.20.10.40:8888/v1
+WorkingDirectory=/opt/dsh-cognee-memory
+# `--apply` is required: the CLI is dry-run by default.
+ExecStart=/usr/bin/node /opt/dsh-cognee-memory/lib/cli/main.js queue drain --apply --workers 2 --json
+# A drain is safe to interrupt: the in-flight item finishes, the rest stays
+# pending. Give systemd a chance to finish that one item before SIGKILL.
+TimeoutStopSec=120
+# Cap a nightly run so a wedged endpoint cannot hold the timer forever.
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
