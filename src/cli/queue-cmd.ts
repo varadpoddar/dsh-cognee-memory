@@ -21,6 +21,14 @@ import { scopeKey } from '../memory/scopes.js'
 import type { CogneeMemoryConfig } from '../config/schema.js'
 import { MemoryError } from '../errors.js'
 import type { ScopeRef } from '../types.js'
+import { redactForIngest } from '../security/ingest-redaction.js'
+import {
+  loadMap,
+  resolveMapKey,
+  resolvePiiMapPath,
+  saveMap,
+  type DetectionOptions,
+} from '../security/pii.js'
 import { drainQueue, type DrainEvent, type DrainSummary, type DrainTarget } from '../queue/drain.js'
 import { collectTranscriptEntries } from '../queue/producer.js'
 import { IngestQueue, resolveQueuePath, type QueueItem, type QueueStatus } from '../queue/store.js'
@@ -62,9 +70,26 @@ export function parseEndpointSpecs(raw: string | undefined, fallback: string): {
   return specs.length === 0 ? [{ name: fallback, url: fallback }] : specs
 }
 
+/**
+ * PII pass configuration, off unless explicitly enabled. The pass costs an LLM
+ * round trip per item, so it is opt-in per deployment rather than default-on.
+ */
+export function piiOptionsFromEnv(env: NodeJS.ProcessEnv): DetectionOptions | undefined {
+  if (env.COGNEE_PII_ENABLED?.trim() !== 'true') return undefined
+  const endpoint = env.COGNEE_PII_ENDPOINT?.trim() || 'http://10.20.10.40:8888/v1'
+  const model = env.COGNEE_PII_MODEL?.trim() || 'unsloth/Qwen3.8-27B-GGUF'
+  const apiKey = env.COGNEE_PII_API_KEY?.trim() || env.UNSLOTH_LARGE_API_KEY?.trim()
+  return { endpoint, model, ...(apiKey === undefined || apiKey === '' ? {} : { apiKey }) }
+}
+
 /** Build one writer per endpoint, each with its own adapter and ledger handle. */
 function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): DrainTarget[] {
   const specs = parseEndpointSpecs(env.COGNEE_QUEUE_ENDPOINTS, config.apiBaseUrl)
+  const pii = piiOptionsFromEnv(env)
+  const mapPath = resolvePiiMapPath(env)
+  const mapKey = pii === undefined ? undefined : resolveMapKey(env)
+  // One map per drain so PERSON_1 means the same person for the whole run.
+  const placeholderMap = mapKey === undefined ? undefined : loadMap(mapPath, mapKey)
   return specs.map((spec) => {
     const endpointConfig: CogneeMemoryConfig = { ...config, apiBaseUrl: spec.url }
     const adapter = createMemoryAdapter({ config: endpointConfig, env, endpoint: () => spec.url })
@@ -83,8 +108,17 @@ function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): Drain
           throw new MemoryError('VALIDATION', 'queue item has no scope reference')
         }
         const identity = identityForScope(ref)
+        // Ordered pass: secrets -> PII -> re-scan -> ingest.
+        const prepared = await redactForIngest(item.text, {
+          ...(pii === undefined ? {} : { pii }),
+          ...(placeholderMap === undefined ? {} : { map: placeholderMap }),
+          secretMode: 'redact',
+        })
+        if (mapKey !== undefined && prepared.piiFindings.length > 0) {
+          saveMap(mapPath, prepared.map, mapKey)
+        }
         await coordinator.remember({
-          text: item.text,
+          text: prepared.text,
           identity,
           provenance: {
             kind: 'import',
