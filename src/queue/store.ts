@@ -565,6 +565,45 @@ export class IngestQueue {
   }
 }
 
+/** A read-only view of the queue as it is on disk right now. */
+export interface QueueSnapshot {
+  readonly status: QueueStatus
+  readonly items: readonly QueueItem[]
+}
+
+/**
+ * Fold the log without opening the queue: no lease release, no writes. The
+ * settings page uses this so a task pruned by the drainer disappears from the
+ * list immediately instead of waiting for the web process to restart.
+ */
+export function readQueueSnapshot(filePath: string, now = Date.now()): QueueSnapshot {
+  const folded = fold(filePath)
+  const items = [...folded.items.values()]
+  const counts: Record<QueueState, number> = { pending: 0, inflight: 0, done: 0, failed: 0 }
+  let dueNow = 0
+  let oldestPending: string | undefined
+  for (const item of items) {
+    counts[item.state] += 1
+    if (item.state === 'pending' || (item.state === 'failed' && item.permanent !== true)) {
+      if (item.nextAttemptAt <= now) dueNow += 1
+    }
+    if (item.state === 'pending' && (oldestPending === undefined || item.createdAt < oldestPending)) {
+      oldestPending = item.createdAt
+    }
+  }
+  return {
+    status: {
+      filePath,
+      total: items.length,
+      counts,
+      dueNow,
+      ...(oldestPending === undefined ? {} : { oldestPendingAt: oldestPending }),
+      lines: folded.lines,
+    },
+    items,
+  }
+}
+
 /** Count lines without opening the queue, for cheap `--status` output. */
 export function queueLineCountFor(filePath: string): number {
   return queueLineCount(filePath)

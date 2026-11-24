@@ -119,7 +119,7 @@ The CLI is installed and the timer is live:
 
 | item | value |
 | --- | --- |
-| deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.4**, node 22.23.5 |
+| deploy path | `/opt/dsh-cognee-memory` (owner `varad`), package **1.0.5**, node 22.23.5 |
 | runtime deps | `npm install --omit=dev --legacy-peer-deps` → `zod` only; built `lib/` ships in the tarball |
 | units | `/etc/systemd/system/dsh-cognify-queue.{service,timer}`, `systemd-analyze verify`-clean |
 | timer | **enabled/active**, next `Wed 2026-11-25 04:02:25 PST` (`04:00` + `RandomizedDelaySec`) |

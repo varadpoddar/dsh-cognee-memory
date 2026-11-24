@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.5 — 2026-11-24
+
+- The **Conversation tasks** table now folds the queue from disk on every
+  inspection (`readQueueSnapshot`), so a task pruned by the drainer disappears
+  immediately instead of lingering in the web process's activation-time view.
+  Also fixes `dueNow` there to ignore permanent failures.
+
 ## 1.0.4 — 2026-11-24
 
 Turn journal: conversations become durable tasks with a completed-only-removal

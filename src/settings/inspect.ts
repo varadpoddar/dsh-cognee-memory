@@ -7,7 +7,7 @@
  * bounded preview on an authenticated page.
  */
 import type { CandidateQueueStatus } from '../memory/candidate-queue.js'
-import type { IngestQueue, QueueItem, QueueStatus } from '../queue/store.js'
+import type { QueueItem, QueueSnapshot, QueueStatus } from '../queue/store.js'
 import type { PendingCandidateView } from '../memory/extraction-service.js'
 import type { OutboxStatus } from '../memory/outbox.js'
 import { scopeKey } from '../memory/scopes.js'
@@ -145,8 +145,8 @@ export interface InspectionDependencies {
     }>
   }
   readonly inventory?: () => Promise<MemoryInventory | undefined>
-  /** Turn-journal queue: the durable conversation tasks waiting for the drain. */
-  readonly queue?: Pick<IngestQueue, 'status' | 'list'>
+  /** Turn-journal queue snapshot, read from disk on every inspection. */
+  readonly queue?: () => QueueSnapshot
   readonly verification?: { has(id: string): boolean }
   readonly now?: () => number
   readonly timeoutMs?: number
@@ -276,12 +276,13 @@ export async function buildInspection(dependencies: InspectionDependencies): Pro
   const prefetchSamples = snapshot.samples['prefetch.latencyMs'] ?? { count: 0, p50: 0, p95: 0 }
   const contextSamples = snapshot.samples['context.usage'] ?? { count: 0, p50: 0, p95: 0 }
 
-  const queueStatus: QueueStatus | undefined = dependencies.queue?.status()
+  const queueSnapshot = dependencies.queue?.()
+  const queueStatus: QueueStatus | undefined = queueSnapshot?.status
   const queueRows =
-    dependencies.queue === undefined
+    queueSnapshot === undefined
       ? undefined
-      : dependencies.queue
-          .list()
+      : queueSnapshot.items
+          .slice()
           .filter((item) => item.state !== 'done')
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
           .slice(0, 50)

@@ -21,7 +21,7 @@ import { registerSessionExtraction } from './hooks/session-events.js'
 import { MEMORY_POLICY_SECTION } from './hooks/prompt-context.js'
 import { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycle.js'
 import { ExtractionService } from './memory/extraction-service.js'
-import { IngestQueue } from './queue/store.js'
+import { IngestQueue, readQueueSnapshot } from './queue/store.js'
 import { TurnJournal, journalQueuePath } from './memory/turn-journal.js'
 import { RecallVerificationLedger } from './memory/recall-verification.js'
 import { buildInspection } from './settings/inspect.js'
@@ -229,6 +229,9 @@ export function apply(
     journalQueue === undefined
       ? undefined
       : new TurnJournal({ config, queue: journalQueue, env: process.env, metrics })
+  // The settings page reads the log from disk, so a pruned task disappears at
+  // once instead of lingering in this process's activation-time fold.
+  const journalPath = journalQueue === undefined ? undefined : journalQueuePath(config, process.env)
   disposers.push(
     registerSessionExtraction(ctx, {
       extraction,
@@ -254,7 +257,9 @@ export function apply(
       identity: {},
       defaultWriteScope: config.scopes.defaultWriteScope,
       extraction,
-      ...(journalQueue === undefined ? {} : { queue: journalQueue }),
+      ...(journalPath === undefined
+        ? {}
+        : { queue: () => readQueueSnapshot(journalPath) }),
       ...(adapter.inventory === undefined
         ? {}
         : { inventory: () => adapter.inventory?.() ?? Promise.resolve(undefined) }),

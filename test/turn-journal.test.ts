@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseConfig } from '../src/config/schema.js'
-import { IngestQueue, contentHashOf } from '../src/queue/store.js'
+import { IngestQueue, contentHashOf, readQueueSnapshot } from '../src/queue/store.js'
 import { chunkText, journalQueuePath, TurnJournal } from '../src/memory/turn-journal.js'
 
 function queueIn(dir: string): IngestQueue {
@@ -208,5 +208,21 @@ describe('journalQueuePath', () => {
     expect(journalQueuePath(fallback, { DSH_HOME: '/tmp/home' })).toBe(
       '/tmp/home/plugins/cognee-memory/ingest-queue.jsonl',
     )
+  })
+})
+
+describe('readQueueSnapshot', () => {
+  it('reflects a prune without reopening the queue (no stale list)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'journal-'))
+    const file = join(dir, 'ingest-queue.jsonl')
+    const queue = IngestQueue.open({ filePath: file })
+    queue.enqueue([{ text: 'finished task', scope: 'dsh-project-p', dedupeKey: 'x' }])
+    const [claimed] = queue.claim({ limit: 1, workerId: 'w' })
+    queue.markDone(claimed?.id ?? '')
+    expect(readQueueSnapshot(file).status.counts.done).toBe(1)
+    queue.pruneDone()
+    const after = readQueueSnapshot(file)
+    expect(after.status.total).toBe(0)
+    expect(after.items).toHaveLength(0)
   })
 })
