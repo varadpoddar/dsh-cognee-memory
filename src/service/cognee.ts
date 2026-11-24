@@ -5,8 +5,8 @@
  * `super(ctx, name)` calls `ctx.reflect.provide(name, this, check)`, and the
  * registration is removed with the providing fiber. DSH 0.2.1-rc.5 bundles
  * `@deepseek-ai/cordis@4.0.5`; the plugin declares that exact version as a
- * required peer so the deployed profile links one copy and the class identity
- * is shared with the host.
+ * required peer so every plugin in the deployed profile resolves the same
+ * `Service` class.
  *
  * Every method delegates to the plugin's single `MemoryCoordinator`, so the
  * service cannot bypass scope authorization, write policy, deduplication,
