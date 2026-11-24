@@ -18,6 +18,24 @@ raw text
 Step 3 is a gate, not a formality: if it still finds credential material the
 write is refused (`ResidualSecretError`) rather than shipped.
 
+## Defaults (2026-11-24)
+
+The two stages deliberately have different defaults:
+
+| stage | default | control |
+| --- | --- | --- |
+| deterministic shaped-secret scrub (stage 1 + stage-3 re-scan) | **always on** | none — no supported flag disables it on the ingest path |
+| LLM PII pass (stage 2: names, addresses, phones, emails, orgs, ids) | **off** | `COGNEE_PII_ENABLED=true`, one line in the instance env file |
+
+The asymmetry is the policy. A leaked live credential in a corpus is an
+incident, not a preference, so shaped-secret scrubbing has no opt-out. A name or
+address in your own project notes is a privacy trade-off the operator is
+entitled to make per deployment, and the pass costs one LLM round trip per
+queued item, so it is opt-in. Enabling PII does **not** weaken the secret scrub:
+the ordered pass still runs stage 1 before stage 2 and the stage-3 re-scan after
+it. Shipping secret-free (unredacted-credential) archives would require a
+*separate*, explicitly reviewed flag; do not reuse `COGNEE_PII_ENABLED` for it.
+
 ## Caught
 
 **Stage 1 — shapes.** High-confidence credential formats only, because a
@@ -134,8 +152,8 @@ intended failure direction.
 
 ## Known gaps to close before relying on this
 
-- The pass is **opt-in** (`COGNEE_PII_ENABLED=true`) and currently applied on the
-  queue drain path; the interactive `memory` tool path still uses stage 1 only.
+- The pass is opt-in **by design** (see **Defaults**) and currently applied on the
+  queue drain path; the interactive `memory` tool path uses stage 1 only.
 - Detection quality is unmeasured on a labelled corpus; the live run reports
   counts and latency on one real sample only.
 - No per-session namespacing of placeholders, so two people can share a number

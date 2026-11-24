@@ -71,8 +71,14 @@ export function parseEndpointSpecs(raw: string | undefined, fallback: string): {
 }
 
 /**
- * PII pass configuration, off unless explicitly enabled. The pass costs an LLM
- * round trip per item, so it is opt-in per deployment rather than default-on.
+ * PII pass configuration. Default is OFF (`COGNEE_PII_ENABLED=false`); set
+ * `COGNEE_PII_ENABLED=true` to re-enable. The pass costs an LLM round trip per
+ * item, so it is opt-in per deployment rather than default-on.
+ *
+ * This toggle does not affect stage 1/3: the deterministic shaped-secret scrub
+ * is unconditional on the ingest path (see `redactForIngest`), because a leaked
+ * live credential in a corpus is an incident rather than a preference. A flag
+ * for unredacted secrets would have to be separate and explicit.
  */
 export function piiOptionsFromEnv(env: NodeJS.ProcessEnv): DetectionOptions | undefined {
   if (env.COGNEE_PII_ENABLED?.trim() !== 'true') return undefined

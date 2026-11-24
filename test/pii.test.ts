@@ -19,6 +19,7 @@ import {
   ResidualSecretError,
   summarizePii,
 } from '../src/security/ingest-redaction.js'
+import { piiOptionsFromEnv } from '../src/cli/queue-cmd.js'
 
 function jsonResponse(content: string): Response {
   return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 })
@@ -189,5 +190,36 @@ describe('ordered ingest pipeline', () => {
     expect(result.text).not.toContain('Dana')
     expect(result.text).not.toContain('Rivoli')
     expect(result.map.lookup('PERSON', 'Dana Whitfield')).toBe('PERSON_1')
+  })
+})
+
+describe('redaction defaults', () => {
+  it('leaves the LLM PII pass off unless COGNEE_PII_ENABLED=true', () => {
+    expect(piiOptionsFromEnv({})).toBeUndefined()
+    expect(piiOptionsFromEnv({ COGNEE_PII_ENABLED: 'false' })).toBeUndefined()
+    expect(piiOptionsFromEnv({ COGNEE_PII_ENABLED: '1' })).toBeUndefined()
+  })
+
+  it('enables the PII pass with the default local model when toggled on', () => {
+    const options = piiOptionsFromEnv({ COGNEE_PII_ENABLED: 'true' })
+    expect(options?.endpoint).toBe('http://10.20.10.40:8888/v1')
+    expect(options?.model).toBe('unsloth/Qwen3.8-27B-GGUF')
+  })
+
+  it('still scrubs shaped secrets with no options at all (no opt-out on ingest)', async () => {
+    const secrets = [
+      'sk-abcdefghijklmnopqrstuvwxyz012345',
+      'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+      'AKIAIOSFODNN7EXAMPLE',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+      'password = hunter2hunter2',
+    ]
+    for (const secret of secrets) {
+      const result = await redactForIngest(`before ${secret} after`)
+      expect(result.text).not.toContain(secret)
+      expect(result.text).toContain('[REDACTED:')
+      expect(result.residualSecretKinds).toEqual([])
+      expect(result.piiApplied).toBe(false)
+    }
   })
 })
