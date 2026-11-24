@@ -55,6 +55,13 @@ export async function drainQueue(options: DrainOptions): Promise<DrainSummary> {
   let failed = 0
   let stopped = false
 
+  // Retry backoff (`resilience.sleep`) unrefs its timer so a plugin request
+  // never pins the host process open. In a standalone drain that means a
+  // transient failure mid-retry can empty the event loop and exit 0 while the
+  // worker still awaits — the item stays `inflight` and the timer silently does
+  // nothing. One ref'd keeper for the duration of the drain prevents that.
+  const keepAlive = setInterval(() => {}, 1_000)
+
   const runWorker = async (target: DrainTarget): Promise<void> => {
     for (;;) {
       if (processed + failed >= limit) return
@@ -85,6 +92,7 @@ export async function drainQueue(options: DrainOptions): Promise<DrainSummary> {
   }
 
   await Promise.all(options.targets.slice(0, workers).map((target) => runWorker(target)))
+  clearInterval(keepAlive)
 
   return {
     processed,

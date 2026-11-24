@@ -12,8 +12,16 @@ Group=varad
 # The queue lives in this instance's DSH home, not the system one.
 Environment=DSH_HOME=/home/varad/.dsh
 EnvironmentFile=/etc/dsh-varad/varad.env
-# One worker per model endpoint. Unset => the single configured apiBaseUrl.
-Environment=COGNEE_QUEUE_ENDPOINTS=gpu0=http://10.20.10.40:8888/v1
+# The CLI reads the *plugin* settings env name, which is not the COGNEE_BASE_URL
+# used by the MCP servers. Without this the drain silently falls back to
+# http://127.0.0.1:8000 and retries forever.
+Environment=COGNEE_MEMORY_API_BASE_URL=http://10.20.10.15:8000/api/v1
+# One worker per target, and `--workers` is capped by the number of targets.
+# The backfill runs two workers against the single Cognee endpoint (there is no
+# second GPU/endpoint here): two aliases of the same base URL = 2 workers.
+Environment=COGNEE_QUEUE_ENDPOINTS=cognee=http://10.20.10.15:8000/api/v1,cognee-2=http://10.20.10.15:8000/api/v1
+# LLM PII pass stays off; the deterministic shaped-secret scrub is unconditional.
+Environment=COGNEE_PII_ENABLED=false
 WorkingDirectory=/opt/dsh-cognee-memory
 # `--apply` is required: the CLI is dry-run by default.
 ExecStart=/usr/bin/node /opt/dsh-cognee-memory/lib/cli/main.js queue drain --apply --workers 2 --json
