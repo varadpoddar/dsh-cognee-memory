@@ -115,6 +115,12 @@ export function filterActiveHits(hits: readonly RecallHit[], now = Date.now()): 
 export interface MemoryBlockBudget {
   readonly maxTokens: number
   readonly maxItems: number
+  /**
+   * Absolute browser-facing origin for per-memory provenance links, e.g.
+   * `https://dsh.example`. When absent, lines keep the compact
+   * `label · scope · date` form and no URL is invented.
+   */
+  readonly publicBaseUrl?: string
 }
 
 export interface MemoryBlock {
@@ -153,9 +159,24 @@ export function memoryDate(record: RecallHit['record']): string {
   return Number.isFinite(at) ? new Date(at).toISOString().slice(0, 10) : 'unknown'
 }
 
-/** One rendered memory line; shared by the formatter and the budget planner. */
-export function memoryItemLine(hit: RecallHit): string {
-  return `- ${memoryLabel(hit)} · ${hit.record.scope.scope} · ${memoryDate(hit.record)}`
+/** Absolute detail URL for one memory, or `undefined` without a public origin. */
+export function memoryDetailUrl(hit: RecallHit, publicBaseUrl?: string): string | undefined {
+  const base = publicBaseUrl?.trim().replace(/\/+$/, '')
+  if (base === undefined || base === '') return undefined
+  return `${base}/plugins/cognee-memory/memory/${encodeURIComponent(hit.record.id)}`
+}
+
+/**
+ * One rendered memory line; shared by the formatter and the budget planner.
+ * The label carries the memory itself, then scope, date, and (when the
+ * deployment names a public origin) that memory's absolute provenance URL.
+ * The URL is data for the operator, not an instruction, and never includes the
+ * settings token.
+ */
+export function memoryItemLine(hit: RecallHit, publicBaseUrl?: string): string {
+  const base = `- ${memoryLabel(hit)} · ${hit.record.scope.scope} · ${memoryDate(hit.record)}`
+  const url = memoryDetailUrl(hit, publicBaseUrl)
+  return url === undefined ? base : `${base} · ${url}`
 }
 
 /**
@@ -175,7 +196,7 @@ export function formatMemoryBlock(
   const lines: string[] = []
   for (const hit of hits.slice(0, itemCap)) {
     if (hit.record.text.trim() === '') continue
-    const line = memoryItemLine(hit)
+    const line = memoryItemLine(hit, budget.publicBaseUrl)
     const candidate = `${header}\n${[...lines, line].join('\n')}`
     if (estimateTokens(candidate) > maxTokens) continue
     lines.push(line)

@@ -98,13 +98,14 @@ function takeWithin(
   hits: readonly RecallHit[],
   maxTokens: number,
   remainingItems: number,
+  publicBaseUrl?: string,
 ): { readonly hits: RecallHit[]; readonly tokens: number } {
   const taken: RecallHit[] = []
   let used = 0
   for (const hit of hits) {
     if (taken.length >= remainingItems) break
     if (hit.record.text.trim() === '') continue
-    const lineTokens = estimateTokens(memoryItemLine(hit))
+    const lineTokens = estimateTokens(memoryItemLine(hit, publicBaseUrl))
     if (used + lineTokens > maxTokens) break
     taken.push(hit)
     used += lineTokens
@@ -215,10 +216,12 @@ export class RetrievalCoordinator {
     // question-matching fact.
     const queryFloor = Math.max(1, Math.ceil(budget.maxItems / 2))
     const reserved = Math.min(queryCandidates.length, queryFloor)
+    const publicBaseUrl = this.config.settings.publicBaseUrl
     const stable = takeWithin(
       stableCandidates,
       budget.stableTokens,
       Math.max(0, budget.maxItems - reserved),
+      publicBaseUrl,
     )
 
     const chosenKeys = new Set(stable.hits.map(recordKey))
@@ -226,6 +229,7 @@ export class RetrievalCoordinator {
       queryCandidates.filter((hit) => !chosenKeys.has(recordKey(hit))),
       budget.queryTokens,
       Math.max(0, budget.maxItems - stable.hits.length),
+      publicBaseUrl,
     )
     for (const hit of specific.hits) chosenKeys.add(recordKey(hit))
 
@@ -235,6 +239,7 @@ export class RetrievalCoordinator {
       stableCandidates.filter((hit) => !chosenKeys.has(recordKey(hit))),
       Math.max(0, budget.stableTokens - stable.tokens),
       Math.max(0, budget.maxItems - stable.hits.length - specific.hits.length),
+      publicBaseUrl,
     )
     for (const hit of backfill.hits) chosenKeys.add(recordKey(hit))
 
@@ -245,6 +250,7 @@ export class RetrievalCoordinator {
     const block = formatMemoryBlock(chosen, {
       maxTokens: combinedCap,
       maxItems: budget.maxItems,
+      ...(publicBaseUrl === undefined ? {} : { publicBaseUrl }),
     })
 
     const elapsedMs = this.now() - started

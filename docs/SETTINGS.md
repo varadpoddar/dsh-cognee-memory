@@ -114,16 +114,31 @@ The settings file contains only URL/enable flags. `memory_status` and
 (`COGNEE_API_KEY` by default, `config.apiTokenEnv`) and never its value. Log lines
 name the new endpoint only.
 
-## Provenance detail view (0.2.0)
+## Provenance detail view (1.0.2)
 
-`GET /plugins/cognee-memory/memory/<id>` returns provenance JSON and, with
-`?format=html` or `Accept: text/html`, a script-free detail page with a Cognee UI
-deep link. `GET /plugins/cognee-memory/memories.json` lists the caller-readable
-memories for the side panel. Both use the same `COGNEE_MEMORY_SETTINGS_TOKEN`
-(`503` unset, `401` missing/wrong) and the recall scope policy; unknown,
-cross-scope, and foreign-principal ids all answer a generic `404`. Every memory
-row on the settings page links to its detail page when the request carries a
-token. See [UI_INTEGRATION.md](UI_INTEGRATION.md) §"Security model".
+`GET /plugins/cognee-memory/memory/<id>` returns provenance JSON. With
+`?format=page` (or the older `?format=html`, or `Accept: text/html`) it returns
+a script-free HTML panel showing the dataset name/UUID, document/data id,
+`created_at`, confidence, search type, source refs, excerpt, and a deep link to
+the Cognee UI (`http://10.20.10.15:3000` by default). The panel is covered by
+the same CSP as the settings page: `default-src 'none'`, inline styles only, no
+scripts and no remote fetches.
+
+`GET /plugins/cognee-memory/memories.json` lists the caller-readable memories
+for the side panel. Both surfaces use the same
+`COGNEE_MEMORY_SETTINGS_TOKEN` (`503` unset, `401` missing/wrong) and the recall
+scope policy; unknown, cross-scope, and foreign-principal ids all answer a
+generic `404`. Every memory row on the settings page links to its detail page
+when the request carries a token. See [UI_INTEGRATION.md](UI_INTEGRATION.md)
+§Security model.
+
+When `settings.publicBaseUrl` is configured, every `Known context:` line ends
+with that memory's absolute panel URL. The URL never contains the settings
+token: the model sees the address, and the operator supplies the token in the
+browser or as a header. The retrieval token cap is unchanged (stable 300 +
+query 900); because the URL is part of the line, the budget planner counts it
+and may drop a lower-ranked item if the configured cap would otherwise be
+exceeded.
 
 ## Milestone 9 additions (2026-11-22)
 

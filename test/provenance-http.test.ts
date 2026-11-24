@@ -287,6 +287,20 @@ describe('provenance detail page', () => {
     expect(response.body).not.toContain(SECRET)
   })
 
+  it('serves the panel with ?format=page as CSP-safe HTML', async () => {
+    const h = harness({ env, datasetId: '11111111-2222-3333-4444-555555555555' })
+    const response = await h.request(`${PROVENANCE_PATH_PREFIX}mem-1?token=${TOKEN}&format=page`)
+    expect(response.status).toBe(200)
+    expect(response.headers['content-type']).toContain('text/html')
+    expect(response.headers['content-security-policy']).toContain("default-src 'none'")
+    expect(response.body).toContain('dsh-project-demo-project')
+    expect(response.body).toContain('11111111-2222-3333-4444-555555555555')
+    expect(response.body).toContain('2026-01-02T03:04:05.000Z')
+    expect(response.body).toContain('high')
+    expect(response.body).toContain(`${DEFAULT_COGNEE_UI_BASE_URL}/datasets/11111111-2222-3333-4444-555555555555`)
+    expect(response.body).not.toContain(TOKEN)
+  })
+
   it('escapes HTML injection in a memory body and renders no script', async () => {
     const h = harness({ env })
     const response = await h.request(`${PROVENANCE_PATH_PREFIX}mem-2`, 'GET', {

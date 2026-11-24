@@ -241,6 +241,22 @@ describe('RetrievalCoordinator', () => {
     expect(safeRecall).toHaveBeenCalledTimes(4)
   })
 
+  it('adds an absolute per-memory link without changing the configured token budget', async () => {
+    const safeRecall = vi.fn(async () => [hit('memory-1', 'Release codename: amber-otter-7731')])
+    const { coordinator: retrieval, cfg } = coordinator(safeRecall, {
+      config: config({ settings: { publicBaseUrl: 'https://dsh.example/' } }),
+    })
+    const outcome = await retrieval.retrieve({ query: QUESTION, turn: 1 })
+    expect(outcome.block).toContain('amber-otter-7731')
+    expect(outcome.block).toContain(
+      'https://dsh.example/plugins/cognee-memory/memory/memory-1',
+    )
+    expect(outcome.tokens).toBeLessThanOrEqual(
+      cfg.retrieval.stableTokens + cfg.retrieval.queryTokens,
+    )
+    expect(cfg.retrieval.stableTokens + cfg.retrieval.queryTokens).toBe(1_200)
+  })
+
   it('formats label, scope, and date through one shared contract', () => {
     const block = formatMemoryBlock(
       [hit('1', 'alpha', 0.95), hit('2', 'beta', 0.5), hit('3', 'gamma', 0.1)],

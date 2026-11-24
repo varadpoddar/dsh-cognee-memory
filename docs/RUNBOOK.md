@@ -121,3 +121,47 @@ No npm publish, so the artifact is the tarball in `release-candidates/`.
    headless recall answers the fixture.
 4. Memory data is preserved: the plugin never deletes Cognee datasets on
    rollback. Full detail and triggers: `ROLLBACK.md`.
+
+## 7. Reset the web profile to base (no plugin)
+
+This is the procedure used to prove the 1.0.2 layer loads from a clean base. It
+keeps the data and backs up the whole state directory first; it does not delete
+Cognee datasets or the legacy tarballs.
+
+```bash
+# on the Proxmox host, into CT 103
+TS=$(date +%s); B=/root/backups/dsh-pre-reset-$TS
+pct exec 103 -- systemctl stop deepseek-harness
+pct exec 103 -- bash -c "mkdir -p $B && cp -a /var/lib/deepseek-harness/.dsh $B/dsh \
+  && (cd $B && find dsh -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)"
+```
+
+Then, **as `dsh`**, remove `dsh-cognee-memory` from
+`profiles/web/package.json` (`dependencies` and `dsh.profile.bundles`) and delete
+its `- id: cognee-memory` row from `profiles/web/cordis.patch.yml` (keep
+`cordis.patch.yml.bak-baseline`). Run `dsh plugin --profile web install`, restart,
+and require `systemctl show -p SubState deepseek-harness.service` → `running`
+with no `cognee-memory` row in `dsh --profile web --dump-config`. Re-add the
+packed tarball with `dsh plugin --profile web add <tgz>` and restore the config
+row; `--dump-config` must contain `- id: cognee-memory` again.
+
+## 8. Check the 1.0.2 panel through Traefik
+
+The operator token is in `/etc/dsh/cognee.env`; never print it. Pick an id from
+the authenticated list, then check the public origin:
+
+```bash
+pct exec 103 -- bash -c 'set -a; . /etc/dsh/cognee.env; set +a; \
+  ID=$(curl -s -H "Authorization: Bearer $COGNEE_MEMORY_SETTINGS_TOKEN" \
+    https://dsh.nomad.opsc.io/plugins/cognee-memory/memories.json \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)[\"memories\"][0][\"id\"])"); \
+  for u in "" "?format=page"; do \
+    curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $COGNEE_MEMORY_SETTINGS_TOKEN" \
+      "https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/$ID$u"; \
+  done'
+# expect 200 200; without the header 401; a foreign id 404
+```
+
+The `Known context:` block now ends every line with the absolute panel URL. The
+retrieval cap is still stable 300 + query 900; if the added URL would exceed it,
+the formatter drops whole lower-ranked items rather than splitting a line.

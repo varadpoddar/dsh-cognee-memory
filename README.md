@@ -7,12 +7,12 @@ prompt (memory as data, never instructions), exposes
 writes explicit facts and task outcomes back automatically, serves an
 authenticated settings page, and ships a memory-provenance side panel.
 
-Version **1.0.0** — verified against DSH `0.2.1-rc.5` and Cognee
+Version **1.0.2** — verified against DSH `0.2.1-rc.5` and Cognee
 `1.6.10-local` on CT 103. No DSH core patch is needed.
 
 ```text
 Known context:
-- The maintenance window for this project is 03:00-04:00 UTC. · project · 2026-11-22
+- The maintenance window for this project is 03:00-04:00 UTC. · project · 2026-11-22 · https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/<id>
 ```
 
 ## What it does
@@ -31,8 +31,9 @@ Known context:
 - **Automatic writes.** An explicit fact stated in a user message is extracted
   and ingested; committed task outcomes are written back. A durable outbox
   survives process exit.
-- **Operator surfaces.** Authenticated settings page, provenance JSON/HTML per
-  memory, memory list, and a right-sidebar provenance panel.
+- **Operator surfaces.** Authenticated settings page, provenance JSON and a
+  script-free HTML panel per memory, memory list, and a right-sidebar provenance
+  panel. Each `Known context:` line carries the memory's absolute panel URL.
 
 ## Install
 
@@ -118,6 +119,28 @@ The token is in `/etc/dsh/cognee.env`; `memory_status` prints the URL (with that
 placeholder, never the value) when `settings.publicBaseUrl` is configured. The
 routes exist only in a profile that mounts `dsh-host-webserver` (the `web`
 profile). See [docs/SETTINGS.md](docs/SETTINGS.md) for the full access matrix.
+
+### Memory provenance panel
+
+Each `Known context:` line ends with the memory's absolute detail URL, e.g.
+`https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/<id>`. The same path with
+`?format=page` renders the CSP-safe HTML panel (dataset, document/data id,
+`created_at`, confidence, source refs, excerpt, and a deep link to the Cognee UI
+at `http://10.20.10.15:3000`). Without `format`, it returns provenance JSON.
+Both require the operator token as `?token=...` or `Authorization: Bearer ...`.
+
+How to test on CT 103 (values never printed):
+
+```bash
+set -a; . /etc/dsh/cognee.env; set +a
+ID=...  # an id from /plugins/cognee-memory/memories.json
+for suffix in "" "?format=page"; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "Authorization: Bearer $COGNEE_MEMORY_SETTINGS_TOKEN" \
+    "https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/$ID$suffix"
+done
+# -> 200 200; no token -> 401; a foreign/unknown id -> 404
+```
 
 ## Operator CLI
 

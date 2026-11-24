@@ -80,14 +80,25 @@ src/
     agent-lifecycle.ts         agent/created, agent/pre-step, agent/disposed
     task-lifecycle.ts          authoritative task-outcome recorder (not hook-wired)
   tools/                       memory_{recall,remember,forget,status}
+  service/cognee.ts            class-backed ctx.cognee over the coordinator
   security/{access-policy,redaction,secrets}.ts
   telemetry/metrics.ts
 ```
 
 Everything under `src/` is strict TypeScript, ESM, NodeNext, and built with
-`tsc -p tsconfig.build.json`. Host types are modelled structurally rather than
-imported, so the package builds without vendoring DSH's internal packages. The
-structural shapes are taken from the `.d.ts` citations above.
+`tsc -p tsconfig.build.json`. Most host types are modelled structurally rather
+than imported, so the package builds without vendoring DSH's internal packages.
+The exception is `@deepseek-ai/cordis`: `ctx.cognee` extends its `Service` base
+class, so Cordis `4.0.5` is a **required peer dependency** (the exact version
+DSH 0.2.1-rc.5 bundles) and the deployed web profile lists it as a direct
+dependency. `pnpm why @deepseek-ai/cordis` must show one instance; the plugin
+does not fall back to `ctx.provide`.
+
+`CogneeService` registers itself in `super(ctx, 'cognee')` and is removed with
+the providing fiber. The API object is created before `super()` and captured by
+the class methods, because Cordis can activate a dependent synchronously while
+`provide()` runs. A reload disposes the old fiber (unregistering the service)
+before the new registration, so there is exactly one `ctx.cognee`.
 
 ---
 

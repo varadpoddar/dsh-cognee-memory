@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.0.2 — 2026-11-23
+
+Profile-layer, service and panel hardening. No Cognee schema migration; memory
+data and existing provenance ids are preserved.
+
+### `ctx.cognee` is a real Cordis Service
+
+- `@deepseek-ai/cordis@4.0.5` (the exact version DSH 0.2.1-rc.5 bundles) is now
+  a required peer dependency, and the deployed web profile lists it directly.
+  `pnpm why @deepseek-ai/cordis` resolves one install.
+- `ctx.cognee` is a `class CogneeService extends Service`, not an object passed
+  to `ctx.provide`. Registration is fiber-owned: dispose unregisters it and a
+  reload leaves exactly one registration. The method surface is unchanged
+  (`recall` / `remember` / `forget` / `status` / `scopesFor`).
+- The API is built before `super()` so a dependent activated synchronously by
+  Cordis can call the service immediately.
+
+### Panel and model-visible links
+
+- Every `Known context:` line now ends with the memory's absolute provenance URL
+  (`settings.publicBaseUrl` + `/plugins/cognee-memory/memory/<id>`). The URL
+  never contains the settings token; the memory text remains first on the line.
+- The retrieval cap is unchanged (stable 300 + query 900 tokens). The budget
+  planner counts the URL and drops whole lower-ranked items if needed.
+- `GET /plugins/cognee-memory/memory/<id>?format=page` returns the CSP-safe
+  provenance panel (dataset, document/data id, `created_at`, confidence, source
+  refs, excerpt, Cognee UI deep link). `format=html` remains an alias; no
+  `format` returns JSON. Authorized `200`, missing token `401`, foreign id
+  `404`.
+
+### Packaging
+
+- Version 1.0.2 tarball; `cordis.patch.yml`, `dsh.bundle`, built `lib/`, docs
+  and scripts ship, tests and credentials do not.
+- Deployment runbook now records the base-profile reset and the Traefik panel
+  checks.
+
+
 ## 1.0.1 — 2026-11-23
 
 Backup, restore and packaging hardening. No change to the plugin's runtime

@@ -5,9 +5,10 @@
  * Routes (both mounted with `ctx.webServer.register`, the only host-side web
  * extension point in DSH 0.2.1-rc.5 — `dsh-host-webserver/lib/types/index.d.ts:174`):
  *
- *   GET /plugins/cognee-memory/memory/<id>            -> provenance JSON
- *   GET /plugins/cognee-memory/memory/<id>?format=html -> detail page
- *   GET /plugins/cognee-memory/memories.json         -> readable memory list
+ *   GET /plugins/cognee-memory/memory/<id>             -> provenance JSON
+ *   GET /plugins/cognee-memory/memory/<id>?format=page -> detail page
+ *   GET /plugins/cognee-memory/memory/<id>?format=html -> detail page (alias)
+ *   GET /plugins/cognee-memory/memories.json           -> readable memory list
  *
  * SECURITY — identical to the settings routes and the recall path:
  *   - `COGNEE_MEMORY_SETTINGS_TOKEN` unset -> 503; missing/wrong -> 401.
@@ -242,7 +243,10 @@ function renderNotFound(): string {
 
 function wantsHtml(req: IncomingMessage, url: URL): boolean {
   const format = url.searchParams.get('format')
-  if (format !== null && format !== '') return format.toLowerCase() === 'html'
+  if (format !== null && format !== '') {
+    const normalized = format.toLowerCase()
+    return normalized === 'page' || normalized === 'html'
+  }
   return String(req.headers.accept ?? '').toLowerCase().includes('text/html')
 }
 
