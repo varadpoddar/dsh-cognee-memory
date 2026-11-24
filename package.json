@@ -65,15 +65,12 @@
     "zod": "^4.6.7"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.5",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.5",
     "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.1-rc.5"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    },
     "@deepseek-ai/dsh-host-webserver": {
       "optional": true
     },

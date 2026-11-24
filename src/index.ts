@@ -32,7 +32,8 @@ import { createRecallTool } from './tools/recall.js'
 import { createRememberTool } from './tools/remember.js'
 import { createForgetTool } from './tools/forget.js'
 import { createStatusTool } from './tools/status.js'
-import { registerCogneeService } from './service/cognee.js'
+import { createCogneeServiceRegistration } from './service/cognee.js'
+import type { Context } from '@deepseek-ai/cordis'
 
 /** Cordis plugin name. */
 export const name = 'cognee-memory'
@@ -107,7 +108,7 @@ export { createMemoryAdapter } from './adapters/memory-adapter.js'
 export {
   COGNEE_SERVICE_NAME,
   createCogneeService,
-  registerCogneeService,
+  createCogneeServiceRegistration,
 } from './service/cognee.js'
 export type { CogneeServiceApi, CogneeServiceStatus } from './service/cognee.js'
 
@@ -165,9 +166,14 @@ export function apply(
   let disposed = false
 
   // Shared, typed `ctx.cognee` service: a thin, authorization-preserving
-  // surface over the same coordinator the tools and hooks use. Registration is
-  // fiber-owned, so unload/dispose removes it with everything else below.
-  disposers.push(registerCogneeService(ctx, { coordinator, config, metrics }))
+  // surface over the same coordinator the tools and hooks use. Cordis owns the
+  // service registration on this plugin's fiber; disposing the fiber removes it
+  // with everything else below, so there is no separate manual disposer.
+  void createCogneeServiceRegistration(ctx as unknown as Context, {
+    coordinator,
+    config,
+    metrics,
+  })
 
   const dispose = (): void => {
     if (disposed) return

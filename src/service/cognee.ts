@@ -1,29 +1,25 @@
 /**
  * Shared `ctx.cognee` service.
  *
- * Registration idiom: Cordis gives a plugin one fiber-owned way to publish a
- * named service — `ctx.provide(name, value)`; the value is unregistered when
- * the returned disposer runs or the providing fiber unloads
- * (`cordis/lib/types/context.d.ts:36-41`, `reflect.d.ts:33-41`). The `Service`
- * base class is a thin wrapper over exactly that call
- * (`service.d.ts:5-10,31-38` calls `ctx.reflect.provide(name, this, check)`),
- * but it cannot be imported here: `@deepseek-ai/cordis` is not resolvable from
- * the deployed profile (verified: ERR_MODULE_NOT_FOUND from
- * `$DSH_HOME/profiles/web`), so the service is a plain typed object registered
- * through the same underlying `ctx.provide` primitive.
+ * Cordis 4 exports a `Service` base class whose constructor owns publication:
+ * `super(ctx, name)` calls `ctx.reflect.provide(name, this, check)`, and the
+ * registration is removed with the providing fiber. DSH 0.2.1-rc.5 bundles
+ * `@deepseek-ai/cordis@4.0.5`; the plugin declares that exact version as a
+ * required peer so the deployed profile links one copy and the class identity
+ * is shared with the host.
  *
  * Every method delegates to the plugin's single `MemoryCoordinator`, so the
  * service cannot bypass scope authorization, write policy, deduplication,
  * budgets, or the ledger/provenance side effects. Read paths degrade like the
  * coordinator's `open` failure mode; writes surface typed `MemoryError`s.
  */
+import { Service, type Context } from '@deepseek-ai/cordis'
 import { MemoryError, isMemoryError } from '../errors.js'
 import type { CogneeMemoryConfig } from '../config/schema.js'
 import type { MemoryCoordinator } from '../memory/coordinator.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type {
   CallerIdentity,
-  PluginContextLike,
   Provenance,
   RecallHit,
   ScopeRef,
@@ -228,21 +224,46 @@ export function createCogneeService(deps: CogneeServiceDependencies): CogneeServ
 }
 
 /**
- * Publish the service on the plugin's own fiber. A context without `provide`
- * (plain structural test doubles) is a no-op rather than a crash; a duplicate
- * registration is reported to telemetry and leaves the existing provider in
- * place, so loading the plugin twice never takes the process down.
+ * Build and publish the class-backed `ctx.cognee` service. `Service` owns
+ * registration and automatic removal with the providing fiber; there is no
+ * manual disposer to leak.
+ *
+ * The API is constructed before `super()` because Cordis may activate a
+ * dependent synchronously while `provide()` runs. The class methods close over
+ * that API rather than a field initialized after `super()`, so a dependent can
+ * call `ctx.cognee` the moment it becomes visible.
  */
-export function registerCogneeService(
-  ctx: PluginContextLike,
+export function createCogneeServiceRegistration(
+  ctx: Context,
   deps: CogneeServiceDependencies,
-): () => void {
-  if (typeof ctx.provide !== 'function') return () => {}
-  try {
-    const dispose = ctx.provide(COGNEE_SERVICE_NAME, createCogneeService(deps))
-    return typeof dispose === 'function' ? () => void dispose() : () => {}
-  } catch {
-    deps.metrics?.increment('cognee.service.conflict')
-    return () => {}
+): CogneeServiceApi {
+  const api = createCogneeService(deps)
+  class CogneeService extends Service implements CogneeServiceApi {
+    recall(query: string, options?: CogneeRecallOptions): Promise<readonly RecallHit[]> {
+      return api.recall(query, options)
+    }
+
+    remember(
+      candidate: CogneeRememberCandidate,
+      options?: { readonly identity?: CallerIdentity },
+    ): Promise<{ id: string; scope: ScopeRef; createdAt: string; deduplicated: boolean }> {
+      return api.remember(candidate, options)
+    }
+
+    forget(
+      id: string,
+      options?: CogneeForgetOptions,
+    ): Promise<{ id: string; scope: ScopeRef; forgotten: boolean }> {
+      return api.forget(id, options)
+    }
+
+    status(): Promise<CogneeServiceStatus> {
+      return api.status()
+    }
+
+    scopesFor(identity: CallerIdentity): Promise<readonly ScopeRef[]> {
+      return api.scopesFor(identity)
+    }
   }
+  return new CogneeService(ctx, COGNEE_SERVICE_NAME)
 }

@@ -5,10 +5,9 @@ import { identity, createHarness, record } from './helpers/fake-coordinator.js'
 import {
   COGNEE_SERVICE_NAME,
   createCogneeService,
-  registerCogneeService,
+  createCogneeServiceRegistration,
   type CogneeServiceApi,
 } from '../src/service/cognee.js'
-import type { PluginContextLike } from '../src/types.js'
 
 /** Let a freshly loaded cordis plugin finish its apply/active transition. */
 function tick(ms = 5): Promise<void> {
@@ -26,7 +25,7 @@ describe('ctx.cognee service registration', () => {
     const provider = {
       name: 'cognee-provider',
       apply(ctx: Context) {
-        registerCogneeService(ctx as unknown as PluginContextLike, {
+        createCogneeServiceRegistration(ctx, {
           coordinator: harness.coordinator,
           config: harness.config,
           metrics: harness.metrics,
@@ -63,7 +62,7 @@ describe('ctx.cognee service registration', () => {
     const fiber = root.plugin({
       name: 'cognee-provider',
       apply(ctx: Context) {
-        registerCogneeService(ctx as unknown as PluginContextLike, {
+        createCogneeServiceRegistration(ctx, {
           coordinator: harness.coordinator,
           config: harness.config,
         })
@@ -76,33 +75,28 @@ describe('ctx.cognee service registration', () => {
     expect(root.get(COGNEE_SERVICE_NAME)).toBeUndefined()
   })
 
-  it('honours the disposer returned by registration', async () => {
+  it('leaves exactly one registration after unload and reload', async () => {
     const harness = createHarness()
     const root = new Context()
-    let disposeRegistration: (() => void) | undefined
-    const fiber = root.plugin({
+    const provider = {
       name: 'cognee-provider',
       apply(ctx: Context) {
-        disposeRegistration = registerCogneeService(ctx as unknown as PluginContextLike, {
+        createCogneeServiceRegistration(ctx, {
           coordinator: harness.coordinator,
           config: harness.config,
         })
       },
-    })
+    }
+    const first = root.plugin(provider)
     await tick()
     expect(root.get(COGNEE_SERVICE_NAME)).toBeDefined()
-    disposeRegistration?.()
+    await first.dispose()
     await tick()
     expect(root.get(COGNEE_SERVICE_NAME)).toBeUndefined()
-    await fiber.dispose()
-  })
-
-  it('registers nothing (and never throws) on a context without provide', () => {
-    const harness = createHarness()
-    const bare = {} as PluginContextLike
-    expect(() =>
-      registerCogneeService(bare, { coordinator: harness.coordinator, config: harness.config }),
-    ).not.toThrow()
+    const second = root.plugin(provider)
+    await tick()
+    expect(root.get(COGNEE_SERVICE_NAME)).toBeDefined()
+    await second.dispose()
   })
 })
 
