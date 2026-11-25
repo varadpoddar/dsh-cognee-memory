@@ -75,6 +75,54 @@ Backup procedure: [BACKUP.md](docs/BACKUP.md). Restore drill:
   a per-memory panel link: [ARCHITECTURE.md](docs/ARCHITECTURE.md),
   [MEMORY_LINKING.md](docs/MEMORY_LINKING.md).
 
+## Documentation memory
+
+These docs are also **ingested into the varad instance's Cognee memory**, so a
+service question ("where is SeaweedFS hosted, what IP and S3 endpoint does it
+use?") is answered from the written truth. The addresses were discovered at
+deploy time and never appear in a conversation turn — one of them occurs 0× in
+1,772 stored turns — so summaries alone cannot answer it, and older summaries
+still carry a stale plan that put Infisical on `10.20.10.21`.
+
+- **Documents** — the nine files in this directory
+  (`ACHIEVEMENTS.md`, `SEAWEEDFS.md`, `INFISICAL.md`, `BACKUP.md`, `RESTORE.md`,
+  `RUNBOOK.md`, `SUMMARY_PIPELINE.md`, `TRANSCRIPTS.md`, `TURN_JOURNAL.md`),
+  copied to `/home/varad/.dsh/docs/` on CT 103.
+- **Chunking** — one memory per H2 section, plus one per row of the service and
+  secret tables in this file, because a register row *is* the retrievable fact.
+  Every chunk starts with `# <file> · <section>` and is stored with a
+  `[[dsh-memory-pointer …]]` header whose session id is `doc:<file>`. The
+  model-visible `Known context:` line is the first ~240 characters of the
+  chunk, which is why an address or a credential path leads its own chunk.
+- **Path** — `scripts/ingest-docs.mjs` builds the chunks and enqueues them with
+  `kind: "summary"` into the durable ingest queue. The normal drain batches them
+  through Cognee `/add` + `/cognify` (the 1.0.9 batched path), so redaction,
+  dedupe, the provenance index and the ledger row are the ones every memory
+  gets. Target scope `project:varad/mac-history` →
+  `dsh-project-varad-mac-history-5c5a11e6b8d6859e32a4`.
+
+**Re-ingest after an edit.** Copy the edited markdown into
+`/home/varad/.dsh/docs/` and run, as `varad`:
+
+```bash
+su -s /bin/bash varad -c 'set -a; . /etc/dsh-varad/varad.env; set +a; \
+  export DSH_HOME=/home/varad/.dsh; \
+  node /home/varad/.dsh/scripts/ingest-docs.mjs --docs /home/varad/.dsh/docs --apply'
+```
+
+The script is a dry run by default (it prints the chunk plan). An unchanged
+chunk is skipped (`added: 0`); an edited one is enqueued again under the same
+section key and the drain ingests it. Superseded chunks stay in place — memory
+is append-only — and the newest version wins at retrieval.
+
+**Verified 2026-11-25.** The injected `Known context:` block for the SeaweedFS
+question carried `10.20.10.21`, `S3 :8333` and `/root/seaweedfs-creds`; the
+Infisical question carried `10.20.10.22` and `:8080`. Every line ended with its
+per-memory panel link under
+`https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/…`. Full four-question
+evidence, including the one question that still does *not* pass (ordered
+history), is in [ACCEPTANCE.md](docs/ACCEPTANCE.md).
+
 ## Related design records
 
 [COGNEE_DECISIONS.md](docs/COGNEE_DECISIONS.md),
