@@ -119,7 +119,10 @@ is append-only — and the newest version wins at retrieval.
 question carried `10.20.10.21`, `S3 :8333` and `/root/seaweedfs-creds`; the
 Infisical question carried `10.20.10.22` and `:8080`. Every line ended with its
 per-memory panel link under
-`https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/…`. Full four-question
+`https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/…`. A one-shot headless
+answer with no tool calls repeated the same facts from that block:
+`10.20.10.21` / `http://10.20.10.21:8333` / `/root/seaweedfs-creds` for
+SeaweedFS, and `CT 109` / `10.20.10.22:8080` for Infisical. Full four-question
 evidence, including the one question that still does *not* pass (ordered
 history), is in [ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
