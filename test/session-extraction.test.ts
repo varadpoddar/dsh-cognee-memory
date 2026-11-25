@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { registerSessionExtraction } from '../src/hooks/session-events.js'
+import { TranscriptStore } from '../src/memory/transcript-store.js'
 import type { ExtractionTurnInput } from '../src/memory/extraction-service.js'
 import { createFakePluginContext } from './helpers/fake-context.js'
 
@@ -277,5 +281,54 @@ describe('turn journal hook', () => {
     })
     h.emit('session/event', session, { type: 'turn/end', turn: 1 })
     expect(h.journaled).toHaveLength(0)
+  })
+})
+
+describe('lossless transcript hook', () => {
+  const directories: string[] = []
+  afterEach(() => {
+    for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
+  })
+
+  it('stores both sides verbatim, with no 2 000-char cap, once per turn', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'session-transcript-'))
+    directories.push(directory)
+    const store = new TranscriptStore({ dir: join(directory, 'transcripts') })
+    const fake = createFakePluginContext()
+    registerSessionExtraction(fake.ctx, {
+      extraction: { async handleTurn() {} },
+      transcripts: store,
+    })
+    const emit = (name: string, ...args: unknown[]): void => {
+      for (const entry of fake.listeners) {
+        if (entry.name === name) entry.listener(...(args as never[]))
+      }
+    }
+    const long = 'L'.repeat(5_000)
+    emit('session/event', session, { type: 'turn/start', turn: 1 })
+    emit('session/event', session, {
+      type: 'user/message',
+      turn: 1,
+      seq: 1,
+      message: userMessage(`${long} and the tail`),
+    })
+    emit('session/event', session, {
+      type: 'assistant/message',
+      turn: 1,
+      seq: 2,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'noted' }], source: { kind: 'model' } },
+    })
+    emit('session/event', session, { type: 'turn/end', turn: 1 })
+
+    const rows = store.readTurns('session-a', 0, 10)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.role).toBe('user')
+    expect(rows[0]?.text).toBe(`${long} and the tail`)
+    expect(rows[1]?.role).toBe('assistant')
+    expect(rows[1]?.text).toBe('noted')
+
+    // A repeated boundary (fallback after turn/end) is idempotent, not a rewrite.
+    emit('session/event', session, { type: 'turn/end', turn: 1 })
+    expect(store.readTurns('session-a', 0, 10)).toHaveLength(2)
   })
 })

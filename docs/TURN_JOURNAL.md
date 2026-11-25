@@ -60,6 +60,20 @@ with `source.partIndex`/`partOf`.
 - enqueue and prune take a cross-process lock (`ingest-queue.jsonl.lock`), so
   the web process journaling a turn cannot race the drainer's prune rewrite.
 
+## Transcript store (1.0.6)
+
+The journal answers "what still has to be ingested"; it cannot answer "what were
+the exact words of turn 12" once a task is pruned. A second, separate store does
+that: `$DSH_HOME/plugins/cognee-memory/transcripts/<session>.jsonl`
+(docs/TRANSCRIPTS.md). Both sides of every committed turn are appended verbatim,
+with no character cap, fsynced under a cross-process lock. The journal's
+`chunkChars` split and `redactAtEnqueue` policy do **not** apply to it: it is
+the evidence copy, 0600 on the local disk. A pointer
+`{session_id, turn_start, turn_end, segment_index, content_hash, char_start,
+char_end}` names a range, and the detail page resolves it to the exact text (or
+an honest "transcript unavailable" note). Summarization and backfill of that
+store arrive in later slices.
+
 ## Configuration
 
 ```yaml

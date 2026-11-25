@@ -23,6 +23,8 @@ export type MetricName =
   | 'journal.skipped.noScope'
   | 'journal.answers'
   | 'journal.failed'
+  | 'transcript.appended'
+  | 'transcript.failed'
   | 'extraction.llm.requests'
   | 'extraction.llm.failures'
   | 'extraction.llm.deferred'

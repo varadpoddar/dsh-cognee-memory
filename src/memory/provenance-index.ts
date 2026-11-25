@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { confidenceFor, sanitizeMemoryText, type Confidence } from './context-format.js'
+import { deserializePointer, type TranscriptPointer } from './pointer.js'
 import { sameScope, scopeKey } from './scopes.js'
 import { redactSecrets } from '../security/redaction.js'
 import type { CallerIdentity, MemoryScope, RecallHit, ScopeRef } from '../types.js'
@@ -82,6 +83,12 @@ export interface ProvenanceEntry {
   readonly supersededBy?: string
   readonly sources: readonly ProvenanceSourceRef[]
   readonly excerpt: string
+  /**
+   * Optional pointer to the exact transcript range this memory came from. The
+   * detail page resolves it against the lossless transcript store; an entry
+   * without one simply has no Source section.
+   */
+  readonly pointer?: TranscriptPointer
   readonly updatedAt: string
 }
 
@@ -266,6 +273,7 @@ export class ProvenanceIndex {
         ...(existing?.supersededBy === undefined ? {} : { supersededBy: existing.supersededBy }),
         sources: existing?.sources ?? [],
         excerpt: boundedExcerpt(hit.record.text),
+        ...(existing?.pointer === undefined ? {} : { pointer: existing.pointer }),
         updatedAt: at,
       }
       this.entries.set(id, Object.freeze(next))
@@ -294,6 +302,8 @@ export class ProvenanceIndex {
       readonly taskId?: string
       readonly sessionId?: string
     }
+    /** Exact transcript range this memory came from, when known. */
+    readonly pointer?: TranscriptPointer
     readonly state?: ProvenanceIngestState
   }): void {
     this.ensureLoaded()
@@ -325,6 +335,9 @@ export class ProvenanceIndex {
         ...sourceRefsFromProvenance(input.provenance),
       ]),
       excerpt: input.text !== undefined && input.text.trim() !== '' ? boundedExcerpt(input.text) : existing?.excerpt ?? '',
+      ...((input.pointer ?? existing?.pointer) === undefined
+        ? {}
+        : { pointer: input.pointer ?? existing?.pointer }),
       updatedAt: at,
     }
     this.entries.set(input.id, Object.freeze(entry))
@@ -348,6 +361,22 @@ export class ProvenanceIndex {
         dataset: { name: existing.dataset.name, id: datasetId.trim() },
         updatedAt: this.now().toISOString(),
       }),
+    )
+    this.persist()
+  }
+
+  /**
+   * Attach or replace the transcript pointer for one memory. Used by the
+   * summarization slice; a no-op for an unknown id.
+   */
+  setPointer(memoryId: string, pointer: TranscriptPointer): void {
+    this.ensureLoaded()
+    if (!isAddressableMemoryId(memoryId)) return
+    const existing = this.entries.get(memoryId)
+    if (existing === undefined || existing.pointer === pointer) return
+    this.entries.set(
+      memoryId,
+      Object.freeze({ ...existing, pointer: Object.freeze({ ...pointer }), updatedAt: this.now().toISOString() }),
     )
     this.persist()
   }
@@ -453,6 +482,7 @@ function normalizeEntry(value: unknown): ProvenanceEntry | undefined {
   const dataset = row.dataset as { name?: unknown; id?: unknown } | undefined
   const ingest = row.ingest as { state?: unknown; attempts?: unknown; reason?: unknown } | undefined
   const surfaced = row.surfaced as { searchType?: unknown; confidence?: unknown; at?: unknown } | undefined
+  const pointer = deserializePointer(row.pointer)
   return Object.freeze({
     id: row.id,
     principalId: typeof row.principalId === 'string' ? row.principalId : '',
@@ -492,6 +522,7 @@ function normalizeEntry(value: unknown): ProvenanceEntry | undefined {
         )
       : [],
     excerpt: row.excerpt,
+    ...(pointer === undefined ? {} : { pointer }),
     updatedAt: row.updatedAt,
   })
 }

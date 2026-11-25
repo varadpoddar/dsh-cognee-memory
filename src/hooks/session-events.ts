@@ -21,6 +21,20 @@ interface TurnMessage {
   readonly seq?: number
 }
 
+/**
+ * Minimal surface of the lossless transcript store the hook needs. Kept
+ * structural so this hook does not import the store's fs/lock machinery.
+ */
+interface TranscriptWriter {
+  appendTurn(input: {
+    readonly sessionId: string
+    readonly turnIndex: number
+    readonly role: 'user' | 'assistant'
+    readonly text: string
+    readonly timestamp?: string
+  }): unknown
+}
+
 interface TurnBucket {
   readonly turn: number
   readonly messages: TurnMessage[]
@@ -58,8 +72,9 @@ function textFromMessage(message: unknown): string {
     // Text only: reasoning blocks are never persisted or extracted.
     if (typed.type === 'text' && typeof typed.text === 'string') parts.push(typed.text)
   }
-  const text = parts.join('\n').trim()
-  return text.length > 2_000 ? '' : text
+  // Verbatim: the transcript store has no char cap, and extraction bounds its
+  // own facts (`MAX_FACT_CHARS`). A long committed message is never dropped.
+  return parts.join('\n').trim()
 }
 
 /**
@@ -102,6 +117,11 @@ export function registerSessionExtraction(
     readonly extraction: Pick<ExtractionService, 'handleTurn'>
     /** Optional turn journal: every conversation part becomes a durable task. */
     readonly journal?: Pick<TurnJournal, 'enabled' | 'recordTurn'>
+    /**
+     * Lossless transcript store: every committed turn (both sides) is appended
+     * verbatim, with no char cap, so a later pointer can resolve to exact text.
+     */
+    readonly transcripts?: TranscriptWriter
     readonly metrics?: Metrics
     /**
      * Upper bound on how long the serial turn boundary waits for extraction
@@ -117,11 +137,50 @@ export function registerSessionExtraction(
   const journaled = new Set<string>()
 
   /**
+   * Append this turn's conversation to the lossless transcript store. One row
+   * per role per turn, both sides verbatim; the store itself is idempotent, so
+   * a fallback path repeating a turn writes nothing twice. Synchronous because
+   * the append is fsynced; a failure never breaks the turn.
+   */
+  const recordTranscript = (sessionId: string, turn: number, bucket: TurnBucket): void => {
+    const transcripts = deps.transcripts
+    if (transcripts === undefined) return
+    const timestamp = new Date().toISOString()
+    const textOf = (entries: readonly TurnMessage[]): string =>
+      entries.map((entry) => entry.text).join('\n\n')
+    try {
+      if (bucket.messages.length > 0) {
+        transcripts.appendTurn({
+          sessionId,
+          turnIndex: turn,
+          role: 'user',
+          text: textOf(bucket.messages),
+          timestamp,
+        })
+        deps.metrics?.increment('transcript.appended')
+      }
+      if (bucket.answers.length > 0) {
+        transcripts.appendTurn({
+          sessionId,
+          turnIndex: turn,
+          role: 'assistant',
+          text: textOf(bucket.answers),
+          timestamp,
+        })
+        deps.metrics?.increment('transcript.appended')
+      }
+    } catch {
+      deps.metrics?.increment('transcript.failed')
+    }
+  }
+
+  /**
    * Append this turn's conversation parts to the durable queue. Synchronous on
    * purpose: the append is fsynced, so once the turn is committed on disk the
    * task is on disk too. Failures never break the turn.
    */
   const journalTurn = (sessionId: string, turn: number, bucket: TurnBucket): void => {
+    recordTranscript(sessionId, turn, bucket)
     const journal = deps.journal
     if (journal === undefined || !journal.enabled) return
     const key = `${sessionId}:${turn}`

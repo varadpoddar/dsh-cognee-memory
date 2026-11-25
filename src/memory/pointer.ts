@@ -1,0 +1,151 @@
+/**
+ * Stable transcript pointer — the join between a derived artifact (a segment
+ * summary) and the exact words it came from.
+ *
+ * STABILITY GUARANTEES:
+ *   - `content_hash` is sha256 over the exact segment text (whole turns joined
+ *     with `\n\n`), so equal text -> equal hash and any edit changes it;
+ *   - `segment_index` is derived from the ordered turn sequence (role-run
+ *     index, 0-based) and is preserved verbatim by build/serialize/deserialize;
+ *   - `turn_start`/`turn_end` come from the first/last turn in input order, and
+ *     `char_start`/`char_end` are UTF-16 code units into the same canonical
+ *     transcript text the lossless store uses;
+ *   - serialization uses one fixed key order, so a round trip is byte-stable.
+ *
+ * The field set is exactly the seven fields below: no schema version, model, or
+ * prompt fields in this slice (summarization adds those in a later slice).
+ */
+import { createHash } from 'node:crypto'
+import { MemoryError } from '../errors.js'
+import { segmentHash, type SegmentTurn, type TurnSegment } from './segmenter.js'
+
+/** One addressable transcript range. */
+export interface TranscriptPointer {
+  readonly session_id: string
+  readonly turn_start: number
+  readonly turn_end: number
+  readonly segment_index: number
+  /** sha256 hex over the exact segment text. */
+  readonly content_hash: string
+  readonly char_start: number
+  readonly char_end: number
+}
+
+const HASH_PATTERN = /^[a-f0-9]{64}$/
+
+/** sha256 hex over exact text bytes (the pointer hash). */
+export function pointerHash(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function fail(message: string): never {
+  throw new MemoryError('VALIDATION', message)
+}
+
+function segmentText(turns: readonly SegmentTurn[]): string {
+  return turns.map((turn) => turn.text).join('\n\n')
+}
+
+/** Build a pointer from ordered turns, recomputing the hash from the text. */
+export function buildPointer(input: {
+  readonly sessionId: string
+  readonly segmentIndex: number
+  readonly turns: readonly SegmentTurn[]
+  readonly charStart: number
+  readonly charEnd: number
+}): TranscriptPointer {
+  const { sessionId, segmentIndex, turns, charStart, charEnd } = input
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') fail('pointer session id is required')
+  if (!isNonNegativeInteger(segmentIndex)) fail('pointer segment index must be a non-negative integer')
+  if (turns.length === 0) fail('pointer needs at least one turn')
+  if (!isNonNegativeInteger(charStart) || !isNonNegativeInteger(charEnd) || charEnd < charStart) {
+    fail('pointer char range is invalid')
+  }
+  const first = turns[0]
+  const last = turns.at(-1)
+  if (first === undefined || last === undefined) fail('pointer needs at least one turn')
+  if (!isNonNegativeInteger(first.turnIndex) || !isNonNegativeInteger(last.turnIndex)) {
+    fail('pointer turn indices must be non-negative integers')
+  }
+  if (last.turnIndex < first.turnIndex) fail('pointer turn range is reversed')
+  return {
+    session_id: sessionId,
+    turn_start: first.turnIndex,
+    turn_end: last.turnIndex,
+    segment_index: segmentIndex,
+    content_hash: pointerHash(segmentText(turns)),
+    char_start: charStart,
+    char_end: charEnd,
+  }
+}
+
+/** Build a pointer for one already-segmented range. */
+export function buildPointerFromSegment(
+  sessionId: string,
+  segment: TurnSegment,
+): TranscriptPointer {
+  if (segment.contentHash !== segmentHash(segment.text)) {
+    fail('segment hash does not match its text')
+  }
+  return buildPointer({
+    sessionId,
+    segmentIndex: segment.segmentIndex,
+    turns: segment.turns,
+    charStart: segment.charStart,
+    charEnd: segment.charEnd,
+  })
+}
+
+/** Stable, compact JSON in the documented key order. */
+export function serializePointer(pointer: TranscriptPointer): string {
+  const ordered: TranscriptPointer = {
+    session_id: pointer.session_id,
+    turn_start: pointer.turn_start,
+    turn_end: pointer.turn_end,
+    segment_index: pointer.segment_index,
+    content_hash: pointer.content_hash,
+    char_start: pointer.char_start,
+    char_end: pointer.char_end,
+  }
+  return JSON.stringify(ordered)
+}
+
+/** Parse and validate a pointer; `undefined` for anything malformed. */
+export function deserializePointer(raw: string | unknown): TranscriptPointer | undefined {
+  let value: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const row = value as Record<string, unknown>
+  const { session_id, turn_start, turn_end, segment_index, content_hash, char_start, char_end } = row
+  if (typeof session_id !== 'string' || session_id.trim() === '') return undefined
+  if (!isNonNegativeInteger(turn_start) || !isNonNegativeInteger(turn_end)) return undefined
+  if (turn_end < turn_start) return undefined
+  if (!isNonNegativeInteger(segment_index)) return undefined
+  if (typeof content_hash !== 'string' || !HASH_PATTERN.test(content_hash)) return undefined
+  if (!isNonNegativeInteger(char_start) || !isNonNegativeInteger(char_end)) return undefined
+  if (char_end < char_start) return undefined
+  return {
+    session_id,
+    turn_start,
+    turn_end,
+    segment_index,
+    content_hash,
+    char_start,
+    char_end,
+  }
+}
+
+/** Whether a resolved range text is still exactly the pointed-at text. */
+export function pointerMatches(pointer: TranscriptPointer, text: string): boolean {
+  return pointerHash(text) === pointer.content_hash
+}

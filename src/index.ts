@@ -23,6 +23,7 @@ import { TaskLifecycleRecorder, registerTaskMemory } from './hooks/task-lifecycl
 import { ExtractionService } from './memory/extraction-service.js'
 import { IngestQueue, readQueueSnapshot } from './queue/store.js'
 import { TurnJournal, journalQueuePath } from './memory/turn-journal.js'
+import { TranscriptStore, resolveTranscriptsDir } from './memory/transcript-store.js'
 import { RecallVerificationLedger } from './memory/recall-verification.js'
 import { buildInspection } from './settings/inspect.js'
 import { ProvenanceIndex, resolveProvenancePath, type ProvenanceAccess } from './memory/provenance-index.js'
@@ -229,6 +230,12 @@ export function apply(
     journalQueue === undefined
       ? undefined
       : new TurnJournal({ config, queue: journalQueue, env: process.env, metrics })
+  // Lossless transcript store: every committed turn, both sides, verbatim, with
+  // no char cap. It is the evidence a pointer resolves to on the detail page.
+  const transcripts = new TranscriptStore({
+    dir: resolveTranscriptsDir(process.env),
+    logger: (message) => process.stderr.write(`dsh-cognee-memory: ${message}\n`),
+  })
   // The settings page reads the log from disk, so a pruned task disappears at
   // once instead of lingering in this process's activation-time fold.
   const journalPath = journalQueue === undefined ? undefined : journalQueuePath(config, process.env)
@@ -236,6 +243,7 @@ export function apply(
     registerSessionExtraction(ctx, {
       extraction,
       ...(journal === undefined ? {} : { journal }),
+      transcripts,
       metrics,
       settleMs: config.extraction.llm.settleMs,
     }),
@@ -286,6 +294,7 @@ export function apply(
       index: provenance,
       store: settings,
       access: provenanceAccess,
+      transcripts,
       ...(adapter.inventory === undefined && adapter.lookupDataset === undefined
         ? {}
         : {

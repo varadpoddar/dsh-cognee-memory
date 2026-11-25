@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.0.6 — 2026-11-24
+
+First slice of the conversation-summary chain: lossless transcript store,
+turn-boundary segmenter, pointer schema, and pointer-to-range panel resolution.
+Summarization (5d) and backfill (5f) are deliberately not in this release.
+
+- **Lossless transcript store** (`src/memory/transcript-store.ts`): every
+  committed turn — user *and* assistant — is appended verbatim, with no char
+  cap, to `$DSH_HOME/plugins/cognee-memory/transcripts/<session>.jsonl`
+  (0600/0700, fsync + cross-process lock, mirroring the ingest queue). Rows are
+  `{session_id, turn_index, role, text, timestamp, char_start, char_end,
+  content_hash}`; reads are by turn and by turn+char range. Restart-safe,
+  corruption-tolerant, idempotent per (turn, role), out-of-order appends
+  refused.
+- **Removed the live 2 000-char cap** in the session hook: a long committed
+  message is no longer dropped. The backfill reader keeps its own limits.
+- **Turn-boundary segmenter** (`src/memory/segmenter.ts`): pure, deterministic,
+  cuts only at role changes; optional `maxCharsPerSegment` splits only between
+  turns and is off by default. Never slices a message.
+- **Pointer schema** (`src/memory/pointer.ts`): exactly
+  `{session_id, turn_start, turn_end, segment_index, content_hash, char_start,
+  char_end}` with `buildPointer`, stable serialize/deserialize, hash over the
+  exact segment text, and `pointerMatches` for staleness.
+- **Panel Source section**: a memory record carrying a pointer renders its
+  session id, turn range, char offsets, and the exact stored transcript text;
+  a missing session shows "transcript unavailable" and a hash mismatch is
+  flagged stale instead of silently pairing edited text.
+- **New JSON route** `GET /plugins/cognee-memory/transcript/<session>/<turn>`
+  (token-protected, same policy as the memory route: no readable scope or an
+  unknown session → generic 404; store not configured → 503).
+- **CLI**: `memory transcript show --session <id> [--turns a..b] [--json]` for
+  offline manual verification.
+- **Docs**: new `docs/TRANSCRIPTS.md` (layout, addressing, retention, size
+  estimate for 682 sessions). Tests: 47 new (store 12, segmenter 9, pointer 10,
+  routes 13, CLI 3); suite 592 green.
+
 ## 1.0.5 — 2026-11-24
 
 - The **Conversation tasks** table now folds the queue from disk on every

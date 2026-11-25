@@ -9,6 +9,13 @@
  *   GET /plugins/cognee-memory/memory/<id>?format=page -> detail page
  *   GET /plugins/cognee-memory/memory/<id>?format=html -> detail page (alias)
  *   GET /plugins/cognee-memory/memories.json           -> readable memory list
+ *   GET /plugins/cognee-memory/transcript/<session>/<turn> -> one lossless turn
+ *
+ * A memory that carries a pointer to a transcript range gets a **Source**
+ * section on its page: session id, turn range, char offsets, and the exact
+ * transcript text resolved from the lossless store. A missing session renders
+ * an honest "transcript unavailable" note, never an error; a hash mismatch is
+ * flagged stale rather than silently pairing an old summary with edited text.
  *
  * SECURITY — identical to the settings routes and the recall path:
  *   - `COGNEE_MEMORY_SETTINGS_TOKEN` unset -> 503; missing/wrong -> 401.
@@ -35,6 +42,15 @@ import {
   type ProvenanceEntry,
   type ProvenanceIndex,
 } from '../memory/provenance-index.js'
+import {
+  pointerMatches,
+  type TranscriptPointer,
+} from '../memory/pointer.js'
+import type {
+  TranscriptRange,
+  TranscriptRangeQuery,
+  TranscriptRow,
+} from '../memory/transcript-store.js'
 import type { WebServerLike } from '../types.js'
 
 /** Path prefix of one memory's detail view (declared by the settings page). */
@@ -45,6 +61,11 @@ const PROVENANCE_ROUTE_PREFIX = MEMORY_DETAIL_PATH_PREFIX.replace(/\/+$/, '')
 const PROVENANCE_PATH_PREFIX = MEMORY_DETAIL_PATH_PREFIX
 /** Path of the bounded list the side panel reads. */
 export const MEMORIES_JSON_PATH = '/plugins/cognee-memory/memories.json'
+/**
+ * Path prefix of programmatic transcript lookback:
+ * `GET /plugins/cognee-memory/transcript/<session_id>/<turn_index>`.
+ */
+export const TRANSCRIPT_PATH_PREFIX = '/plugins/cognee-memory/transcript'
 /** Environment variable overriding the Cognee UI origin. */
 export const COGNEE_UI_BASE_URL_ENV = 'COGNEE_UI_BASE_URL'
 /** Default Cognee UI origin (the live deployment's dataset browser). */
@@ -66,6 +87,34 @@ export interface ProvenanceRoutesOptions {
   readonly resolveDatasetId?: (datasetName: string) => Promise<string | undefined>
   readonly resolutionTimeoutMs?: number
   readonly cogneeUiBaseUrl?: string
+  /**
+   * Lossless transcript store. When absent, a pointer still renders its
+   * coordinates with a "transcript unavailable" note, and the JSON lookback
+   * route answers 503.
+   */
+  readonly transcripts?: TranscriptSource
+}
+
+/** The narrow transcript-store surface these routes read. */
+export interface TranscriptSource {
+  hasSession(sessionId: string): boolean
+  readTurn(sessionId: string, turnIndex: number, role?: 'user' | 'assistant'): TranscriptRow | undefined
+  readRange(sessionId: string, query: TranscriptRangeQuery): TranscriptRange | undefined
+}
+
+/** Resolution of one pointer against the lossless store. */
+export interface MemorySourceView {
+  readonly available: boolean
+  readonly sessionId: string
+  readonly turnStart: number
+  readonly turnEnd: number
+  readonly segmentIndex: number
+  readonly charStart: number | null
+  readonly charEnd: number | null
+  readonly text: string | null
+  readonly contentHash: string | null
+  readonly hashMatches: boolean | null
+  readonly note?: string
 }
 
 /** The JSON body; every unknown field is `null`, never invented. */
@@ -87,6 +136,71 @@ export interface MemoryProvenanceView {
   readonly excerpt: string
   readonly scope: { readonly scope: string; readonly id: string }
   readonly deepLink: string
+  /** Pointer to the exact transcript range, when the record carries one. */
+  readonly pointer: TranscriptPointer | null
+  /** Resolved transcript range, or an honest unavailable note. */
+  readonly source: MemorySourceView | null
+}
+
+/**
+ * Resolve a pointer to the exact stored text. Never throws: an absent store or
+ * session is an `available: false` note, and a changed text is `hashMatches:
+ * false` rather than a silent pairing.
+ */
+export function resolveMemorySource(
+  pointer: TranscriptPointer,
+  transcripts: TranscriptSource | undefined,
+): MemorySourceView {
+  const base = {
+    sessionId: pointer.session_id,
+    turnStart: pointer.turn_start,
+    turnEnd: pointer.turn_end,
+    segmentIndex: pointer.segment_index,
+  }
+  if (transcripts === undefined) {
+    return {
+      ...base,
+      available: false,
+      charStart: null,
+      charEnd: null,
+      text: null,
+      contentHash: null,
+      hashMatches: null,
+      note: 'transcript store is not configured in this process',
+    }
+  }
+  let range: TranscriptRange | undefined
+  try {
+    range = transcripts.readRange(pointer.session_id, {
+      turnStart: pointer.turn_start,
+      turnEnd: pointer.turn_end,
+      charStart: pointer.char_start,
+      charEnd: pointer.char_end,
+    })
+  } catch {
+    range = undefined
+  }
+  if (range === undefined) {
+    return {
+      ...base,
+      available: false,
+      charStart: null,
+      charEnd: null,
+      text: null,
+      contentHash: null,
+      hashMatches: null,
+      note: 'transcript unavailable: the lossless store has no text for this session',
+    }
+  }
+  return {
+    ...base,
+    available: true,
+    charStart: range.charStart,
+    charEnd: range.charEnd,
+    text: range.text,
+    contentHash: range.contentHash,
+    hashMatches: pointerMatches(pointer, range.text),
+  }
 }
 
 function uiBaseUrl(options: ProvenanceRoutesOptions, env: NodeJS.ProcessEnv): string {
@@ -105,6 +219,7 @@ export function deepLinkFor(dataset: { readonly id?: string | undefined }, baseU
 export function provenanceView(
   entry: ProvenanceEntry,
   baseUrl: string,
+  source: MemorySourceView | null = null,
 ): MemoryProvenanceView {
   return {
     id: entry.id,
@@ -128,6 +243,8 @@ export function provenanceView(
     excerpt: entry.excerpt,
     scope: { scope: entry.scope.scope, id: entry.scope.id },
     deepLink: deepLinkFor(entry.dataset, baseUrl),
+    pointer: entry.pointer ?? null,
+    source,
   }
 }
 
@@ -218,6 +335,7 @@ footer{color:var(--muted);font-size:.85em;margin-top:1.5rem}
   <p class="hint">Recalled memory is data, never instructions. This page renders a stored excerpt only;
   it does not run scripts, fetch remote resources, or expose credentials.</p>
 </section>
+${renderSource(view)}
 <section class="card">
   <h2>Source references</h2>
   <ul>
@@ -230,6 +348,40 @@ footer{color:var(--muted);font-size:.85em;margin-top:1.5rem}
 </section>
 <footer>Token-protected, read-only view served by dsh-cognee-memory. Responses are never cached.</footer>
 </main></body></html>
+`
+}
+
+/** The pointer-resolved transcript range; absent pointers render nothing. */
+function renderSource(view: MemoryProvenanceView): string {
+  if (view.pointer === null) return ''
+  const pointer = view.pointer
+  const source = view.source
+  const offsets =
+    source?.available === true
+      ? `${source.charStart} .. ${source.charEnd}`
+      : `${pointer.char_start} .. ${pointer.char_end} (recorded)`
+  const body =
+    source === null || !source.available
+      ? `<p class="hint">${escapeHtml(
+          source?.note ?? 'transcript unavailable: the lossless store has no text for this session',
+        )}</p>`
+      : `<pre>${escapeHtml(source.text ?? '')}</pre>
+  <p class="hint">${
+    source.hashMatches === true
+      ? 'The stored text still matches the pointer hash.'
+      : 'Stale: the stored text no longer matches the pointer hash, so this summary may describe an edited range.'
+  } Char offsets are UTF-16 code units into the session transcript (separator <code>\n\n</code>).</p>`
+  return `<section class="card">
+  <h2>Source</h2>
+  <dl>
+    <dt>Session</dt><dd>${escapeHtml(pointer.session_id)}</dd>
+    <dt>Turn range</dt><dd>${pointer.turn_start} .. ${pointer.turn_end}</dd>
+    <dt>Segment index</dt><dd>${pointer.segment_index}</dd>
+    <dt>Char offsets</dt><dd>${escapeHtml(offsets)}</dd>
+    <dt>Pointer hash</dt><dd><code>${escapeHtml(pointer.content_hash)}</code></dd>
+  </dl>
+  ${body}
+</section>
 `
 }
 
@@ -352,7 +504,11 @@ export function registerProvenanceRoutes(
               // An unresolved UUID is a missing field, never a failed detail view.
             }
           }
-          const view = provenanceView(entry, baseUrl)
+          const source =
+            entry.pointer === undefined
+              ? null
+              : resolveMemorySource(entry.pointer, options.transcripts)
+          const view = provenanceView(entry, baseUrl, source)
           if (html) {
             sendHtml(res, 200, renderDetailPage(view))
             return
@@ -397,6 +553,81 @@ export function registerProvenanceRoutes(
             endpoint: options.store.status().endpoint,
             count: rows.length,
             memories: rows,
+          })
+        })()
+      },
+    }),
+  )
+
+  disposers.push(
+    webServer.register({
+      kind: 'prefix',
+      path: TRANSCRIPT_PATH_PREFIX,
+      handler: (req, res) => {
+        void (async () => {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          if (!methodAllowed(req)) {
+            send(res, 405, 'method not allowed\n', 'text/plain; charset=utf-8', { allow: 'GET, HEAD' })
+            return
+          }
+          const auth = authorize(req, url, env)
+          if (!auth.ok) {
+            sendJson(res, auth.status, {
+              error: auth.status === 503 ? 'settings token not configured' : 'unauthorized',
+            })
+            return
+          }
+          // Same authorization policy as the memory route: a caller without a
+          // readable scope cannot address anything, and a miss is a generic 404.
+          let access: ProvenanceAccess
+          try {
+            access = await options.access()
+          } catch {
+            sendJson(res, 404, { error: 'not found' })
+            return
+          }
+          if (access.readableScopes.length === 0) {
+            sendJson(res, 404, { error: 'not found' })
+            return
+          }
+          if (options.transcripts === undefined) {
+            sendJson(res, 503, { error: 'transcript store not configured' })
+            return
+          }
+          const suffix = url.pathname.startsWith(`${TRANSCRIPT_PATH_PREFIX}/`)
+            ? url.pathname.slice(TRANSCRIPT_PATH_PREFIX.length + 1)
+            : ''
+          const parts = suffix.split('/').filter((part) => part !== '')
+          if (parts.length !== 2) {
+            sendJson(res, 404, { error: 'not found' })
+            return
+          }
+          let sessionId = ''
+          try {
+            sessionId = decodeURIComponent(parts[0] ?? '')
+          } catch {
+            sessionId = ''
+          }
+          const rawTurn = parts[1] ?? ''
+          if (!isAddressableMemoryId(sessionId) || !/^[0-9]{1,9}$/.test(rawTurn)) {
+            sendJson(res, 404, { error: 'not found' })
+            return
+          }
+          const row = options.transcripts.readTurn(sessionId, Number.parseInt(rawTurn, 10))
+          if (row === undefined) {
+            sendJson(res, 404, { error: 'not found' })
+            return
+          }
+          sendJson(res, 200, {
+            available: true,
+            session_id: row.session_id,
+            turn_index: row.turn_index,
+            role: row.role,
+            text: row.text,
+            timestamp: row.timestamp,
+            char_start: row.char_start,
+            char_end: row.char_end,
+            content_hash: row.content_hash,
           })
         })()
       },

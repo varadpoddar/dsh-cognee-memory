@@ -80,13 +80,14 @@ describe('plugin wiring for the runtime settings page', () => {
     const dispose = apply(pluginContext, { apiBaseUrl: `${first.url}/api/v1` })
     cleanups.push(() => dispose?.())
 
-    // 1. The page, its JSON, and the provenance detail routes are mounted
-    // through ctx.webServer.register.
+    // 1. The page, its JSON, the provenance detail routes, and the lossless
+    // transcript lookback route are mounted through ctx.webServer.register.
     expect([...routes.keys()].sort()).toEqual([
       '/plugins/cognee-memory/memories.json',
       '/plugins/cognee-memory/memory',
       '/plugins/cognee-memory/settings',
       '/plugins/cognee-memory/settings.json',
+      '/plugins/cognee-memory/transcript',
     ])
 
     const statusTool = fake.tools.find((tool) => tool.name === 'memory_status') as ToolDefinitionLike

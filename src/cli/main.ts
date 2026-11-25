@@ -21,6 +21,7 @@ import {
 } from './history-import.js'
 import { allowedScopes, createCliRuntime, describeScope, identityForScope, parseScopeArg } from './runtime.js'
 import { runQueue } from './queue-cmd.js'
+import { runTranscript } from './transcript-cmd.js'
 import { MemoryError } from '../errors.js'
 
 export interface CliIo {
@@ -50,6 +51,8 @@ const VALUE_FLAGS = new Set([
   'preview',
   'workers',
   'queue-sub',
+  'transcript-sub',
+  'turns',
 ])
 const BOOLEAN_FLAGS = new Set(['apply', 'dry-run', 'json', 'help', 'from-sessions', 'drain', 'status'])
 
@@ -63,6 +66,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       // `memory queue <enqueue|drain|status>` takes one positional subcommand.
       if (command === 'queue' && values['queue-sub'] === undefined) {
         values['queue-sub'] = arg
+        continue
+      }
+      if (command === 'transcript' && values['transcript-sub'] === undefined) {
+        values['transcript-sub'] = arg
         continue
       }
       throw new MemoryError('VALIDATION', `unexpected argument: ${arg}`)
@@ -100,6 +107,7 @@ const HELP = [
   '  recall           search one scope and print the records that come back',
   '  remember         write one explicit fact (operator seeding / round-trip proofs)',
   '  queue            durable ingest queue: enqueue | drain | status',
+  '  transcript       lossless transcript store: show',
   '',
   'flags: --scope <name:rawId> --apply --dry-run --json --principal <id>',
   '       import-history: --sessions-dir <dir> --state-file <path> --session <id> --limit-sessions N',
@@ -109,6 +117,7 @@ const HELP = [
   '       import: --in <path> --allow-scope <name:rawId>[,<name:rawId>]',
   '       recall: --query <text> --limit N',
   '       remember: --text <fact>',
+  '       transcript show: --session <id> --turns a..b',
 ].join('\n')
 
 async function runImportHistory(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
@@ -345,6 +354,8 @@ export async function runCli(
         return await runRemember(args, env, io)
       case 'queue':
         return await runQueue(args, env, io)
+      case 'transcript':
+        return await runTranscript(args, env, io)
       default:
         io.err(`unknown command: ${args.command}`)
         io.out(HELP)
