@@ -47,6 +47,8 @@ const limit = Number(arg('limit', 0))
 const sessionsDir = arg('sessions', '/home/varad/import/mac-sessions')
 const outDir = arg('out', '/home/varad/reconcile')
 const concurrency = Number(arg('concurrency', 2))
+/** Per-call timeout; the local Qwen queues behind other work, so allow more. */
+const callTimeoutMs = Number(arg('timeout-ms', 300_000))
 
 const env = process.env
 const config = parseConfig({
@@ -54,7 +56,8 @@ const config = parseConfig({
   scopeDefaults: { projectId: 'varad/mac-history' },
   ingestion: { summaries: { enabled: true, maxOutputTokens: 1000 } },
 })
-const runtime = resolveSummaryRuntime(config, env)
+const runtime0 = resolveSummaryRuntime(config, env)
+const runtime = { ...runtime0, timeoutMs: Number(arg("timeout-ms", 300_000)) }
 if (!runtime.enabled) {
   console.error(`summaries unavailable: ${runtime.reason}`)
   process.exit(2)
@@ -163,7 +166,7 @@ async function worker() {
           maxOutputTokens: runtime.maxOutputTokens,
           maxInputChars: runtime.maxInputChars,
           disableReasoning: runtime.disableReasoning,
-          timeoutMs: runtime.timeoutMs,
+          timeoutMs: callTimeoutMs,
           env,
         },
       )
