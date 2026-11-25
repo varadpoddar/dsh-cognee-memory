@@ -241,17 +241,54 @@ Bucket `dsh-corpus` was created with `aws s3 mb`; the same list+put round trip
 works through `https://s3-seaweed.nomad.opsc.io` with a valid wildcard cert.
 The smoke script is kept at `/root/s3-smoke.sh` in CT 2001.
 
-### Cognee / boto3 settings
+### Cognee integration (1.6.10-local)
+
+Cognee writes its file and graph half here; the relational + pgvector half stays
+in Postgres on CT 106. Settings live in `/opt/stacks/cognee/.env`
+(0600 `root:root`):
 
 | Setting | Value |
 | --- | --- |
-| `AWS_ENDPOINT_URL` | `http://10.20.10.21:8333` (in-cluster) or `https://s3-seaweed.nomad.opsc.io` |
-| `AWS_ACCESS_KEY_ID` | from `/root/seaweedfs-creds` |
-| `AWS_SECRET_ACCESS_KEY` | from `/root/seaweedfs-creds` |
+| `STORAGE_BACKEND` | `s3` |
+| `STORAGE_BUCKET_NAME` | `dsh-corpus` |
+| `DATA_ROOT_DIRECTORY` | `s3://dsh-corpus/cognee/data` |
+| `SYSTEM_ROOT_DIRECTORY` | `s3://dsh-corpus/cognee/system` |
+| `CACHE_ROOT_DIRECTORY` | `s3://dsh-corpus/cognee/cache` |
+| `AWS_ENDPOINT_URL` | `http://10.20.10.21:8333` (in-cluster) |
+| `AWS_ACCESS_KEY_ID` | copied from `/root/seaweedfs-creds` |
+| `AWS_SECRET_ACCESS_KEY` | copied from `/root/seaweedfs-creds` |
 | `AWS_REGION` | `us-east-1` |
-| Addressing | path-style (`S3_FORCE_PATH_STYLE=true`, boto3 `Config(s3={'addressing_style':'path'})`) |
-| Initial bucket | `dsh-corpus` |
-| TLS | ingress only; the in-cluster endpoint is plain HTTP on the private /24 |
+| Addressing | path-style; the endpoint is an IP, so s3fs/botocore select it automatically |
+| Bucket | `dsh-corpus` |
+
+`CACHE_BACKEND=postgres` is required because the default SQLite session cache
+tries to put `cache.db` under the S3 database path. `GRAPH_DATABASE_SUBPROCESS_ENABLED=false`
+is required because the default subprocess mode resolves `s3://...` through
+`os.path.abspath()` to `/app/s3:/...` and writes the graph into the container
+layer instead of the bucket.
+
+What is actually S3-backed:
+
+* ingested documents: `cognee/data/<user-uuid>/...`;
+* Ladybug graph: `cognee/system/databases/<user-uuid>/<dataset-uuid>.lbug`;
+* the `cognee/cache/` prefix is reserved (active session cache is Postgres).
+
+What stays local on CT 106: `cognee_db` plus one Postgres database per dataset
+under `/opt/stacks/cognee/data/pg`, the UI container, and the empty
+`/opt/stacks/cognee/data/cognee` mount.
+
+Cognee 1.6.10-local does **not** read `ENABLE_S3`, `AWS_ENDPOINT_URL_S3`,
+`AWS_S3_BUCKET_NAME`, `BUCKET_NAME`, or a Cognee path-style flag. S3 is selected
+by `STORAGE_BACKEND=s3` plus `s3://` roots; the only endpoint variable its
+`S3Config` reads is `AWS_ENDPOINT_URL`. `S3_FORCE_PATH_STYLE` in
+`/root/seaweedfs-creds` is for the AWS CLI, not Cognee.
+
+Verification on 2026-11-25 (empty stack, then a throwaway dataset):
+`GET /health/detailed` reported `file_storage.provider=s3`; after `add` the
+bucket held `cognee/data/.../text_*.txt`; after `cognify` it held
+`cognee/system/databases/.../<dataset>.lbug`; a `CHUNKS` search returned the
+document text. Deleting the dataset removed both objects, leaving only the
+`health/` smoke objects.
 
 ## 8. Capacity and retention
 
@@ -268,6 +305,13 @@ The smoke script is kept at `/root/s3-smoke.sh` in CT 2001.
   without `/data/seaweed/filer` leaves orphaned blobs.
 
 ## 9. Backup and restore
+
+Since 2026-11-25 `dsh-corpus/cognee/` is the authoritative copy of Cognee's
+ingested files and Ladybug graphs. The Cognee `pg_dumpall` covers only the
+relational/vector half; run both halves from the same quiesced window
+(`docs/BACKUP.md`). A SeaweedFS-only backup is not sufficient to restore Cognee,
+and a Cognee database dump without this bucket restores metadata pointing at
+missing files and graphs.
 
 Backup (quiesced, cheap, node-local):
 
@@ -290,6 +334,12 @@ backup, start master → volume → filer → s3 → admin, then confirm with
 `weed shell` → `volume.list` and an `aws s3 ls` of a known bucket.
 
 ## 10. Rollback
+
+**Do not run the teardown below while `dsh-corpus` holds live Cognee data.** It
+destroys the only copy of the corpus and graphs. To move Cognee back to local
+storage, restore the dump and `.env` per `docs/BACKUP.md`; the commands here are
+for decommissioning SeaweedFS only after that data has been migrated or backed
+up elsewhere.
 
 ```bash
 # CT 2001
@@ -322,8 +372,11 @@ sgdisk -d 6 /dev/sda && partprobe /dev/sda
 * **Filer UI auth is ingress-only**; inside the 10.20.10.0/24 anyone can reach
   `:8888` and `:8333` directly. The S3 port still requires valid credentials;
   the filer UI does not.
-* **Credentials** exist only in CT 2001 at `/root/seaweedfs-creds` (0600) plus
-  the bcrypt hash on CT 104. There is no vault entry; copying them into Cognee's
-  env/secret store is a follow-up.
+* **S3 credentials** now exist in CT 2001 at `/root/seaweedfs-creds` (0600), in
+  Cognee's `/opt/stacks/cognee/.env` (0600 `root:root`), and as the bcrypt hash
+  on CT 104 for the filer UI. There is no vault entry; rotating the S3 identity
+  means updating all three and restarting Cognee. The Cognee API key is
+  separate: `/root/cognee-api-key` (0600) on CT 106 and the `COGNEE_API_KEY`
+  entries in the two DSH consumer env files on CT 103.
 * The Debian `awscli` package does not fit in 4 GB (OOM during install); use the
   static AWS CLI v2 installer if the CLI is reinstalled.
