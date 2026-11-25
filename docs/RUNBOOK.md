@@ -295,3 +295,62 @@ list and full recall. Copying `sessions/` from the Mac would make old threads
 visible, but their recorded cwd (`/Users/varad/…`) does not exist on CT 103, so
 resuming them would run tools against a missing directory; recall is the
 supported way to continue that history.
+
+## 4. Ownership of the plugin state dir (silent memory loss)
+
+The state directory `/home/varad/.dsh/plugins/cognee-memory/` must be owned by
+`varad`. If a root-run process writes into it, the damage is **silent**:
+
+- `ingest-queue.jsonl` becomes `root:root 0600`, so the varad service can no
+  longer append a journal row — new turns are simply not queued, and the service
+  logs nothing until it tries to journal one;
+- a varad reconciler/backfill fails `enqueue` with
+  `EACCES: permission denied, open '.../ingest-queue.jsonl'` and counts it as a
+  per-segment `FAIL`, so the summaries it just paid for are dropped.
+
+This has happened twice: once from a root `pnpm`/`mv` under the profile dir
+(which also produced a `profiles/web` restart loop), and once from a root
+`dsh --profile headless` verification run with `DSH_HOME=/home/varad/.dsh`.
+**Never run `dsh`, `pnpm`, `mv` or a plugin script as root under a DSH home** —
+use `su -s /bin/bash varad -c '...'`, and pass the token/env in, not `sudo`.
+
+Diagnose and repair:
+
+```bash
+find /home/varad/.dsh/plugins/cognee-memory -not -user varad      # offenders
+journalctl -t cognee-owner-guard -n 20 --no-pager                 # repairs
+```
+
+`dsh-cognee-owner-guard.timer` (installed by hand on CT 103, every 10 min)
+re-owns anything `varad` does not own and logs every path it touched under
+`cognee-owner-guard`. It is a safety net, not a licence to run as root: it
+repairs *files*, not the lost work — segments whose enqueue failed must be
+re-summarised (see §5).
+
+```bash
+systemctl list-timers dsh-cognee-owner-guard.timer --no-pager
+```
+
+## 5. Finishing an interrupted backfill
+
+Two loops keep the queue moving while a producer runs. Both are plain scripts in
+`/home/varad` and both are safe to re-run — enqueue dedupes, the drain uses
+leases and tombstones, and 1.0.9 folds the on-disk log under the writer lock so a
+concurrent prune cannot drop a row.
+
+| Script | Does |
+| --- | --- |
+| `drain-watch.sh` | drains while `reconcile-summaries.mjs` or `backfill-apply.mjs` is alive, then one final drain |
+| `finish-reconcile.sh` | waits for the primary reconcile to exit, rebuilds the known-hash set (`summaries.jsonl` + queue `done` + queue pending), re-runs the reconciler against it so **only** segments with no hash anywhere are summarised again, then drains to empty |
+
+The known-hash set is what makes the tail cheap: a segment already admitted has
+its `content_hash` in `summaries.jsonl` or the queue's `done` log, so it is
+skipped; a segment whose enqueue failed has none, so it is exactly what gets
+retried. Progress lands in `/home/varad/reconcile/finish.log`, and the tail
+prints `retry rc=` and `finish complete pending=0` when it is done.
+
+```bash
+tail -f /home/varad/reconcile/apply2.log        # primary pass: progress N/918
+tail -f /home/varad/reconcile/finish.log        # tail: retry + drain
+tail -f /home/varad/drain-continuous.log        # per-batch drain output
+```

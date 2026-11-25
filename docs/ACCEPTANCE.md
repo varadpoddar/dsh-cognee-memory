@@ -80,3 +80,22 @@ implemented; tracked as backlog, not claimed.
 - **Model saturation shows up as latency, not correctness.** Two reconcile items
   failed with `summary model request failed` under load; the reconciler is
   resumable and skips already-enqueued segments, so a re-run retries only those.
+
+## Incident during the doc ingest — silent journaling stop (fixed)
+
+While the docs were being verified, a root-run `dsh --profile headless` wrote
+into `/home/varad/.dsh`, which left `ingest-queue.jsonl` and `provenance.json`
+as `root:root 0600` at 09:46 PT. For that window the varad service could not
+append journal rows at all, and the reconciler failed 16 enqueues with
+`EACCES` — dropping summaries it had already paid the model to produce.
+
+Detected by reading the reconciler's `FAIL` lines rather than trusting the
+"ingested successfully" report, repaired by re-owning the files (backup
+`/root/backups/queue-ownership-20261125T174747Z.tar.gz`), and now guarded by
+`dsh-cognee-owner-guard.timer` (every 10 min, repairs and logs every path) plus
+`finish-reconcile.sh`, which re-summarises exactly the segments that have no
+`content_hash` anywhere. Procedure in [RUNBOOK.md](docs/RUNBOOK.md#4) §4–§5.
+
+This is the second time a root-write under a DSH home caused a failure here; the
+first was a `profiles/web` restart loop. The rule is now written down in both
+places.
