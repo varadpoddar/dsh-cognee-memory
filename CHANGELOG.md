@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.7 — 2026-11-25
+
+Summary throughput: the summarizer now disables Qwen3-style reasoning.
+
+- **`ingestion.summaries.disableReasoning`** (default `true`): every summary
+  request (map and merge) carries `chat_template_kwargs: { enable_thinking:
+  false }`. Measured on three real transcript segments against
+  `unsloth/Qwen3.8-27B-GGUF`: 33 s and 8 382 chars of `reasoning_content` per
+  segment before, 7.8 s and zero reasoning chars after (~4–7x), with the same
+  usable prose. With reasoning off, `maxOutputTokens` 700, 1000 and 4096
+  produce identical output; concurrency 1 vs 2 shows no GPU speedup, so the
+  endpoint is single-stream bound. Set `disableReasoning: false` for an
+  endpoint without that chat-template knob.
+
 ## 1.0.6 — 2026-11-24
 
 Conversation-summary chain: lossless transcript store, turn-boundary segmenter,

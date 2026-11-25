@@ -17,6 +17,7 @@
 import { createMemoryAdapter } from '../adapters/memory-adapter.js'
 import { MemoryCoordinator } from '../memory/coordinator.js'
 import { MemoryLedger, resolveLedgerPath } from '../memory/ledger.js'
+import { ProvenanceIndex, resolveProvenancePath } from '../memory/provenance-index.js'
 import { scopeKey } from '../memory/scopes.js'
 import type { CogneeMemoryConfig } from '../config/schema.js'
 import { MemoryError } from '../errors.js'
@@ -131,11 +132,15 @@ function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): Drain
     const endpointConfig: CogneeMemoryConfig = { ...config, apiBaseUrl: spec.url }
     const adapter = createMemoryAdapter({ config: endpointConfig, env, endpoint: () => spec.url })
     const ledger = new MemoryLedger({ filePath: resolveLedgerPath(env) })
+    // Shared with the panel: a drained summary must appear as a memory, with
+    // its pointer, or the detail route answers 404 for a row Cognee has.
+    const provenanceIndex = new ProvenanceIndex({ filePath: resolveProvenancePath(env), env })
     const coordinator = new MemoryCoordinator({
       adapter,
       config: endpointConfig,
       endpoint: () => spec.url,
       ledger,
+      provenanceIndex,
     })
     return {
       name: spec.name,

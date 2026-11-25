@@ -152,6 +152,13 @@ export const CogneeMemoryConfigSchema = z
             apiKeyEnv: nonEmpty.default('UNSLOTH_LARGE_API_KEY'),
             /** Hard cap on generated summary tokens (also the merge step). */
             maxOutputTokens: z.number().int().min(32).max(4_096).default(700),
+            /**
+             * Send `chat_template_kwargs.enable_thinking:false` so a Qwen3-style
+             * local endpoint answers in prose instead of spending the output
+             * budget on `reasoning_content` (measured 55 s -> ~7 s per segment
+             * with no loss of summary quality). Default on.
+             */
+            disableReasoning: z.boolean().default(true),
             /** Off by default. Positive only splits BETWEEN whole turns. */
             maxCharsPerSegment: z.number().int().min(500).max(500_000).optional(),
             /** Segments summarized concurrently during a backfill. */

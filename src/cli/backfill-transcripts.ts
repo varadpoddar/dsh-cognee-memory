@@ -291,6 +291,7 @@ function summarizerFor(
     maxOutputTokens: runtime.maxOutputTokens,
     maxInputChars: runtime.maxInputChars,
     timeoutMs: runtime.timeoutMs,
+    disableReasoning: runtime.disableReasoning,
     env: options.env,
   }
   return (input) => summarizeSegment(input, summarizerOptions)

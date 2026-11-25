@@ -119,6 +119,8 @@ export interface SummarizerOptions {
   readonly maxInputChars?: number
   readonly timeoutMs?: number
   readonly fetchImpl?: typeof fetch
+  /** Default true: ask the endpoint to skip Qwen3-style reasoning tokens. */
+  readonly disableReasoning?: boolean
 }
 
 /** One rendered summary of one segment. */
@@ -151,6 +153,7 @@ interface ChatRequest {
   readonly maxOutputTokens: number
   readonly timeoutMs: number
   readonly fetchImpl: typeof fetch
+  readonly disableReasoning: boolean
 }
 
 function resolveApiKey(options: SummarizerOptions, env: NodeJS.ProcessEnv): string {
@@ -233,6 +236,9 @@ async function chat(request: ChatRequest, systemPrompt: string, userContent: str
         temperature: 0,
         seed: 0,
         max_tokens: request.maxOutputTokens,
+        ...(request.disableReasoning
+          ? { chat_template_kwargs: { enable_thinking: false } }
+          : {}),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },
@@ -303,6 +309,7 @@ export async function summarizeSegment(
     maxOutputTokens,
     timeoutMs: options.timeoutMs ?? SUMMARY_DEFAULT_TIMEOUT_MS,
     fetchImpl: options.fetchImpl ?? fetch,
+    disableReasoning: options.disableReasoning ?? true,
   }
   const pointer = buildSummaryPointerFromSegment(
     input.sessionId,
@@ -450,6 +457,7 @@ export interface SummaryRuntime {
   readonly maxInputChars: number
   readonly timeoutMs: number
   readonly concurrency: number
+  readonly disableReasoning: boolean
   readonly maxCharsPerSegment?: number
 }
 
@@ -476,6 +484,7 @@ export function resolveSummaryRuntime(
     maxInputChars: block.maxInputChars,
     timeoutMs: block.timeoutMs,
     concurrency: block.concurrency,
+    disableReasoning: block.disableReasoning,
     ...(block.maxCharsPerSegment === undefined
       ? {}
       : { maxCharsPerSegment: block.maxCharsPerSegment }),

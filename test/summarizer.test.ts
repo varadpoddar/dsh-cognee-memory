@@ -106,6 +106,16 @@ describe('pinned summarizer contract', () => {
     expect(calls[0]?.body.temperature).toBe(0)
     expect(calls[0]?.body.seed).toBe(0)
     expect(calls[0]?.body.max_tokens).toBe(SUMMARY_DEFAULT_MAX_OUTPUT_TOKENS)
+    expect(calls[0]?.body.chat_template_kwargs).toEqual({ enable_thinking: false })
+  })
+
+  it('omits the reasoning switch when disableReasoning is false', async () => {
+    const { fetchImpl, calls } = stubFetch(() => 'Plain prose with no reasoning switch.')
+    await summarizeSegment(
+      { sessionId: 's1', segment: SHORT_SEGMENT },
+      { ...OPTIONS, disableReasoning: false, fetchImpl },
+    )
+    expect(calls[0]?.body.chat_template_kwargs).toBeUndefined()
   })
 
   it('is deterministic for identical input', async () => {

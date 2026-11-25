@@ -9,6 +9,7 @@ import { createMemoryAdapter } from '../adapters/memory-adapter.js'
 import { parseConfig, type CogneeMemoryConfig } from '../config/schema.js'
 import { MemoryCoordinator } from '../memory/coordinator.js'
 import { MemoryLedger, resolveLedgerPath } from '../memory/ledger.js'
+import { ProvenanceIndex, resolveProvenancePath } from '../memory/provenance-index.js'
 import { isMemoryScope, makeScopeRef, scopeKey, scopesForIdentity } from '../memory/scopes.js'
 import { SettingsStore, resolveSettingsPath } from '../settings/store.js'
 import { MemoryError } from '../errors.js'
@@ -36,7 +37,16 @@ export function createCliRuntime(env: NodeJS.ProcessEnv = process.env): CliRunti
   const endpoint = (): string => config.apiBaseUrl
   const adapter = createMemoryAdapter({ config, env, endpoint })
   const ledger = new MemoryLedger({ filePath: resolveLedgerPath(env) })
-  const coordinator = new MemoryCoordinator({ adapter, config, endpoint, ledger })
+  // Provenance index: without it, a queued write (nightly drain, backfill
+  // summaries) reaches Cognee but never appears in the panel — the detail route
+  // answers 404 because no local entry exists. The panel and the CLI must share
+  // one index file under DSH_HOME.
+  const provenanceIndex = new ProvenanceIndex({
+    filePath: resolveProvenancePath(env),
+    env,
+    logger: (message) => process.stderr.write(`dsh-cognee-memory: ${message}\n`),
+  })
+  const coordinator = new MemoryCoordinator({ adapter, config, endpoint, ledger, provenanceIndex })
   return { config, adapter, ledger, coordinator }
 }
 
