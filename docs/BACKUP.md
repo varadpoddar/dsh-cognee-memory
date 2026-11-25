@@ -135,6 +135,10 @@ the rollback point for the storage reset:
   cognee.env, compose.yaml, SHA256SUMS   (directory 0700; files 0600)
 ```
 
+Exact-path hardlinks (same inodes, no extra space):
+`/root/backups/cognee-pre-s3-reset-20261125T101246Z.sql.gz` and
+`/root/backups/cognee-pre-s3-reset-20261125T101246Z-data.tar.gz`.
+
 The dump contains 26 `CREATE DATABASE` statements; the data tar has 10,201
 entries. Keep this directory until the user explicitly accepts the S3 layout.
 It is a courtesy copy, not a scheduled backup.
