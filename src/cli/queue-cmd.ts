@@ -3,7 +3,7 @@
  *
  *   memory queue enqueue --from-sessions [--limit-sessions 20] [--limit 500] [--scope name:id] [--dry-run]
  *   memory queue enqueue --text "..." [--scope name:id]
- *   memory queue drain [--workers 2] [--limit 50] [--dry-run] [--json]
+ *   memory queue drain [--workers 2] [--limit 50] [--batch-size 25] [--dry-run] [--json]
  *   memory queue status [--json]
  *
  * Dry run is the default for `enqueue` and `drain`: nothing is written unless
@@ -15,7 +15,7 @@
  * model endpoints (one per GPU) without touching the plugin's settings.
  */
 import { createMemoryAdapter } from '../adapters/memory-adapter.js'
-import { MemoryCoordinator } from '../memory/coordinator.js'
+import { MemoryCoordinator, type RememberRequest } from '../memory/coordinator.js'
 import { MemoryLedger, resolveLedgerPath } from '../memory/ledger.js'
 import { ProvenanceIndex, resolveProvenancePath } from '../memory/provenance-index.js'
 import { scopeKey } from '../memory/scopes.js'
@@ -30,7 +30,13 @@ import {
   saveMap,
   type DetectionOptions,
 } from '../security/pii.js'
-import { drainQueue, type DrainEvent, type DrainSummary, type DrainTarget } from '../queue/drain.js'
+import {
+  drainQueue,
+  type DrainEvent,
+  type DrainItemResult,
+  type DrainSummary,
+  type DrainTarget,
+} from '../queue/drain.js'
 import { collectTranscriptEntries } from '../queue/producer.js'
 import {
   IngestQueue,
@@ -45,6 +51,28 @@ import { createCliRuntime, identityForScope, parseScopeArg } from './runtime.js'
 function defaultSessionsDir(env: NodeJS.ProcessEnv): string {
   const home = env.DSH_HOME?.trim() || `${env.HOME ?? ''}/.dsh`
   return `${home}/sessions`
+}
+
+/** A queue item refused before ingest (no scope, bad payload) never retries. */
+function isPermanentPrepFailure(error: unknown): boolean {
+  return error instanceof MemoryError && ['VALIDATION', 'FORBIDDEN', 'UNAUTHORIZED'].includes(error.code)
+}
+
+/**
+ * Tasks per backend pipeline run. Precedence: `--batch-size`, then
+ * `COGNEE_QUEUE_INGEST_BATCH_SIZE`, then `ingestion.queue.ingestBatchSize`
+ * (default 25). `1` restores one cognify per item.
+ */
+export function resolveIngestBatchSize(
+  raw: string | undefined,
+  env: NodeJS.ProcessEnv,
+  config: CogneeMemoryConfig,
+): number {
+  const parse = (value: string | undefined): number | undefined => {
+    const parsed = Number.parseInt(value ?? '', 10)
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.min(parsed, 200) : undefined
+  }
+  return parse(raw) ?? parse(env.COGNEE_QUEUE_INGEST_BATCH_SIZE) ?? config.ingestion.queue.ingestBatchSize
 }
 
 /** Parse `COGNEE_QUEUE_ENDPOINTS` into named base URLs. */
@@ -142,35 +170,92 @@ function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): Drain
       ledger,
       provenanceIndex,
     })
+    /**
+     * Shared by the per-item and batched paths so redaction and provenance can
+     * never drift between them: a batched summary is indistinguishable from one
+     * drained alone.
+     */
+    const prepare = async (item: QueueItem): Promise<RememberRequest> => {
+      const ref = item.scopeRef
+      if (ref === undefined) {
+        throw new MemoryError('VALIDATION', 'queue item has no scope reference')
+      }
+      const identity = identityForScope(ref)
+      // Ordered pass: secrets -> PII -> re-scan -> ingest.
+      const prepared = await redactForIngest(item.text, {
+        ...(pii === undefined ? {} : { pii }),
+        ...(placeholderMap === undefined ? {} : { map: placeholderMap }),
+        secretMode: 'redact',
+      })
+      if (mapKey !== undefined && prepared.piiFindings.length > 0) {
+        saveMap(mapPath, prepared.map, mapKey)
+      }
+      return {
+        text: prepared.text,
+        identity,
+        provenance: {
+          kind: 'import',
+          source: item.kind === 'summary' ? 'segment-summary' : 'ingest-queue',
+          recordedAt: new Date().toISOString(),
+          evidence: item.kind === 'summary' ? 'queue:summary' : 'queue:nightly',
+          ...(item.source.sessionId === undefined ? {} : { sessionId: item.source.sessionId }),
+          ...(item.source.turnIndex === undefined ? {} : { turn: item.source.turnIndex }),
+        },
+      }
+    }
     return {
       name: spec.name,
       write: async (item: QueueItem): Promise<void> => {
-        const ref = item.scopeRef
-        if (ref === undefined) {
-          throw new MemoryError('VALIDATION', 'queue item has no scope reference')
+        await coordinator.remember(await prepare(item))
+      },
+      /**
+       * Batched write: one `add` of the whole claim plus ONE `cognify`. The
+       * coordinator returns per-item outcomes; the drain retries a failed item
+       * on its own. Without batch support (or when preparation itself fails)
+       * the item is reported failed and the drain falls back to `write`.
+       */
+      writeBatch: async (items: readonly QueueItem[]): Promise<readonly DrainItemResult[]> => {
+        const prepared: { readonly index: number; readonly request: RememberRequest }[] = []
+        const outcomes: (DrainItemResult | undefined)[] = new Array(items.length).fill(undefined)
+        for (let index = 0; index < items.length; index += 1) {
+          const item = items[index]
+          if (item === undefined) continue
+          try {
+            prepared.push({ index, request: await prepare(item) })
+          } catch (error) {
+            outcomes[index] = {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+              permanent: isPermanentPrepFailure(error),
+            }
+          }
         }
-        const identity = identityForScope(ref)
-        // Ordered pass: secrets -> PII -> re-scan -> ingest.
-        const prepared = await redactForIngest(item.text, {
-          ...(pii === undefined ? {} : { pii }),
-          ...(placeholderMap === undefined ? {} : { map: placeholderMap }),
-          secretMode: 'redact',
-        })
-        if (mapKey !== undefined && prepared.piiFindings.length > 0) {
-          saveMap(mapPath, prepared.map, mapKey)
+        const batchRemember = coordinator.rememberBatch?.bind(coordinator)
+        if (batchRemember === undefined || prepared.length === 0) {
+          return items.map(
+            (_, index): DrainItemResult =>
+              outcomes[index] ?? { ok: false, error: 'batched ingest is unavailable in this build' },
+          )
         }
-        await coordinator.remember({
-          text: prepared.text,
-          identity,
-          provenance: {
-            kind: 'import',
-            source: item.kind === 'summary' ? 'segment-summary' : 'ingest-queue',
-            recordedAt: new Date().toISOString(),
-            evidence: item.kind === 'summary' ? 'queue:summary' : 'queue:nightly',
-            ...(item.source.sessionId === undefined ? {} : { sessionId: item.source.sessionId }),
-            ...(item.source.turnIndex === undefined ? {} : { turn: item.source.turnIndex }),
-          },
-        })
+        const results = await batchRemember(prepared.map((entry) => entry.request))
+        for (let slot = 0; slot < prepared.length; slot += 1) {
+          const entry = prepared[slot]
+          if (entry === undefined) continue
+          const result = results[slot]
+          if (result === undefined || !result.ok) {
+            outcomes[entry.index] = {
+              ok: false,
+              error: result === undefined ? 'batch write produced no result' : result.error,
+              ...(result !== undefined && !result.ok && result.permanent === true ? { permanent: true } : {}),
+            }
+            continue
+          }
+          outcomes[entry.index] = { ok: true }
+        }
+        return items.map(
+          (_, index): DrainItemResult =>
+            outcomes[index] ?? { ok: false, error: 'batch write produced no result' },
+        )
       },
     }
   })
@@ -265,10 +350,11 @@ export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, i
     const apply = args.flags.has('apply')
     const limit = args.values.limit === undefined ? undefined : number(args.values.limit, 50)
     const workers = number(args.values.workers, 2)
+    const batchSize = resolveIngestBatchSize(args.values['batch-size'], env, runtime.config)
     if (!apply) {
       const status = queue.status()
       io.out(`dry run: ${status.dueNow} item(s) due across ${targets.length} endpoint(s): ${targets.map((t) => t.name).join(', ')}`)
-      io.out(`would drain with ${Math.min(workers, targets.length)} worker(s)`)
+      io.out(`would drain with ${Math.min(workers, targets.length)} worker(s), batch ${batchSize}`)
       return 0
     }
     const events: DrainEvent[] = []
@@ -276,6 +362,7 @@ export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, i
       queue,
       targets,
       workers,
+      batchSize,
       ...(limit === undefined ? {} : { limit }),
       ...(args.flags.has('json')
         ? {}
@@ -295,7 +382,7 @@ export async function runQueue(args: QueueCommandArgs, env: NodeJS.ProcessEnv, i
       return summary.failed > 0 ? 1 : 0
     }
     io.out(
-      `drained: ok ${summary.processed}  failed ${summary.failed}  workers ${Math.min(workers, targets.length)}  ${summary.durationMs}ms`,
+      `drained: ok ${summary.processed}  failed ${summary.failed}  workers ${Math.min(workers, targets.length)}  batch ${summary.batchSize}  ${summary.batches} pipeline run(s)  ${summary.durationMs}ms`,
     )
     for (const [target, count] of Object.entries(summary.byTarget)) io.out(`  ${target}: ${count}`)
     io.out(`removed ${pruned.removed} completed task(s); ${pruned.remaining} still queued`)

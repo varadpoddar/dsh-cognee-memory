@@ -481,6 +481,38 @@ export function parseDataList(response: unknown): DataItem[] {
   return items
 }
 
+/**
+ * Data ids in the order the documents were submitted.
+ *
+ * Observed `/add` shape: `data_ingestion_info: [{run_info: {...}, data_id,
+ * data_name: "text_<hash>"}]` plus `data_ids: [...]`, one entry per submitted
+ * document. `data_name` is NOT reliably `text_<md5(raw text)>` for multi-line
+ * summaries (measured: it matches for short ASCII text and does not for real
+ * 3 KB summaries), so the response order is the authoritative mapping. Never
+ * derive the batch→id pairing from the dataset listing: it is eventually
+ * consistent and can still miss rows right after a large add.
+ */
+export function dataIdsInOrder(response: unknown): string[] {
+  const ids: string[] = []
+  if (!isRecord(response)) return ids
+  const info = response.data_ingestion_info
+  if (Array.isArray(info)) {
+    for (const entry of info) {
+      if (!isRecord(entry)) continue
+      const id = pickString(entry, ['data_id', 'dataId', 'id'])
+      if (id !== undefined) ids.push(id)
+    }
+  }
+  if (ids.length > 0) return ids
+  const flat = response.data_ids
+  if (Array.isArray(flat)) {
+    for (const entry of flat) {
+      if (typeof entry === 'string' && entry !== '') ids.push(entry)
+    }
+  }
+  return ids
+}
+
 /** The live instance stores `contentHash = md5(raw text)`; used to find a deduped write. */
 export function contentHashOf(text: string): string {
   return createHash('md5').update(text).digest('hex')

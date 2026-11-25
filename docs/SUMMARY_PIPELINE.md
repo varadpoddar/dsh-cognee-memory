@@ -111,6 +111,38 @@ Summaries reuse the journal's entire lifecycle — they are not a second queue:
 - the drain writes it with provenance `source: "segment-summary"`,
   `evidence: "queue:summary"` and the summary's session/turn coordinates.
 
+### Batched ingest
+
+Cognee charges the pipeline, not the document: `/remember` is add+cognify and a
+cognify of one summary measured ~57 s, while a cognify of ten took ~200 s
+(`add` itself: ~1 s). The drain therefore batches: measured on the varad
+instance, 25 summaries went from ~20 min (per item) to 5.4 min in one pipeline
+run (4.6 items/min vs 1.04).
+
+- `ingestion.queue.ingestBatchSize` (default 25) — tasks the drain claims before
+  writing. The batched path is one `POST /add` with every text, one
+  `POST /cognify` for the dataset, then one status poll.
+- `ingestion.queue.batchTimeoutMs` (default 30 min) — the add/cognify requests
+  and their poll share this ceiling; the interactive 120 s/180 s budgets are
+  shorter than a single 10-summary cognify.
+- `ingestion.queue.cognify.dataPerBatch` / `chunksPerBatch` — optional
+  pass-through of Cognee's own parallelism knobs (unset = sequential).
+- `ingestBatchSize: 1` keeps the per-item path for correctness comparisons.
+
+The batch→document pairing comes from the `/add` response in submission order.
+Do not derive it from `data_name` (not the raw-text hash for multi-line
+summaries) or from the dataset listing (eventually consistent right after a
+large add); either mistake makes items look failed after they were written.
+
+Per-item guarantees do not change: each summary is redacted, admitted through
+dedup, indexed with its pointer (the panel's Source section) and mirrored to the
+ledger. Only the backend call is shared. A summary the batch reports failed — or
+a batch whose call throws — is retried on its own, so one bad document cannot
+fail its neighbours, and every claimed task is resolved before the worker moves
+on. Because Cognee cognifies only data that is not yet processed, appending to
+the scope's existing dataset is safe: adding 5 summaries to a 15-item dataset
+took 81.5 s instead of the ~300 s a full re-cognify would need.
+
 ## Configuration
 
 ```yaml
@@ -144,6 +176,8 @@ Varad profile (both `web` and `headless`):
 ingestion:
   summaries:
     enabled: true
+  queue:
+    ingestBatchSize: 25      # add 25 summaries, run one cognify
 ```
 
 With `/etc/dsh/llm.env` present (`UNSLOTH_LARGE_API_KEY=…`) this is on; without

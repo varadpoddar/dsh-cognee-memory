@@ -128,12 +128,34 @@ export type TransportKind = 'mcp-http' | 'mcp-stdio' | 'rest' | 'auto'
 export type ResolvedTransport = Exclude<TransportKind, 'auto'>
 
 /**
+ * Per-item outcome of a batched write (`MemoryAdapter.rememberBatch`). A batch
+ * is never all-or-nothing: one document the backend rejects must leave its
+ * neighbours ingested, so the caller can retry just the failure.
+ */
+export type BatchRememberResult =
+  | {
+      readonly ok: true
+      readonly id: string
+      readonly scope: ScopeRef
+      readonly createdAt: string
+      readonly deduplicated: boolean
+    }
+  | { readonly ok: false; readonly error: string; readonly permanent?: boolean }
+
+/**
  * Transport-neutral memory backend. All adapters must implement every method;
  * unsupported backend capabilities throw `UnsupportedOperationError` rather
  * than silently degrading to a destructive call.
  */
 export interface MemoryAdapter {
   remember(input: RememberInput): Promise<RememberResult>
+  /**
+   * Optional batched write: ingest every input with ONE backend pipeline run.
+   * Inputs share a scope (a drain batch comes from one queue scope); an adapter
+   * may fall back to per-item writes and must still return one result per
+   * input, positionally.
+   */
+  rememberBatch?(inputs: readonly RememberInput[]): Promise<readonly BatchRememberResult[]>
   recall(query: RecallQuery): Promise<readonly RecallHit[]>
   forget(input: ForgetInput): Promise<ForgetResult>
   status(signal?: AbortSignal): Promise<AdapterStatus>

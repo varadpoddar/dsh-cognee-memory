@@ -21,6 +21,7 @@ export const FIXED_NOW = '2026-01-01T00:00:00.000Z'
 
 export interface FakeAdapterCalls {
   readonly remember: RememberInput[]
+  readonly batch: RememberInput[][]
   readonly recall: RecallQuery[]
   readonly forget: ForgetInput[]
   status: number
@@ -56,7 +57,7 @@ export function createHarness(
     scopeDefaults: { projectId: PROJECT_ID },
     ...configOverrides,
   })
-  const calls: FakeAdapterCalls = { remember: [], recall: [], forget: [], status: 0, health: 0 }
+  const calls: FakeAdapterCalls = { remember: [], batch: [], recall: [], forget: [], status: 0, health: 0 }
   const defaults: MemoryAdapter = {
     async remember(input: RememberInput): Promise<RememberResult> {
       return { id: 'mem-1', scope: input.scope, createdAt: FIXED_NOW, deduplicated: false }
@@ -95,6 +96,14 @@ export function createHarness(
       calls.health += 1
       return overrides.health === undefined ? defaults.health() : overrides.health()
     },
+    ...(overrides.rememberBatch === undefined
+      ? {}
+      : {
+          rememberBatch: async (inputs: readonly RememberInput[]) => {
+            calls.batch.push([...inputs])
+            return overrides.rememberBatch!(inputs)
+          },
+        }),
   }
   const metrics = new Metrics(() => new Date(FIXED_NOW))
   const coordinator = new MemoryCoordinator({

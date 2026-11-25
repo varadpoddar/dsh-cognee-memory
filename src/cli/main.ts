@@ -51,6 +51,7 @@ const VALUE_FLAGS = new Set([
   'limit-sessions',
   'preview',
   'workers',
+  'batch-size',
   'queue-sub',
   'transcript-sub',
   'turns',

@@ -47,6 +47,13 @@ export const COGNEE_PATHS = Object.freeze({
   pipelineStatus: `${DATASETS}/status`,
   memoryStatus: `${DATASETS}/status/memory`,
   add: '/api/v1/add',
+  /**
+   * Dataset-level only in Cognee 1.6.10: the payload carries `datasets` /
+   * `datasetIds`, never explicit data ids (those appear only in the
+   * `PipelineRunInfo` answer). Batched ingest therefore runs one cognify over a
+   * dataset that the same batch just extended.
+   */
+  cognify: '/api/v1/cognify',
   remember: '/api/v1/remember',
   search: '/api/v1/search',
   forget: '/api/v1/forget',

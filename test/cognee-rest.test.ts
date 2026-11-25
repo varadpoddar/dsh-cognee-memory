@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { parseConfig, type CogneeMemoryConfig } from '../src/config/schema.js'
 import { CogneeRestAdapter } from '../src/adapters/cognee-rest.js'
@@ -15,6 +16,10 @@ afterEach(async () => {
   await server?.close()
   server = undefined
 })
+
+function md5(text: string): string {
+  return createHash('md5').update(text).digest('hex')
+}
 
 function json(body: unknown, status = 200) {
   return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
@@ -45,6 +50,7 @@ interface FakeCognee {
   readonly datasets: Array<{ id: string; name: string; ownerId?: string }>
   readonly data: Map<string, Array<{ id: string; name: string; contentHash: string }>>
   memoryCalls: number
+  readonly cognifyBodies: Array<Record<string, unknown>>
 }
 
 /** Stateful stand-in for the endpoints the adapter uses, with the observed shapes. */
@@ -56,6 +62,7 @@ function fakeCognee(options: { ownerId?: string; memoryUntilReady?: number } = {
     datasets,
     data,
     memoryCalls: 0,
+    cognifyBodies: [],
     handler(request) {
       const url = new URL(request.url ?? '/', 'http://mock')
       const path = url.pathname
@@ -116,6 +123,50 @@ function fakeCognee(options: { ownerId?: string; memoryUntilReady?: number } = {
           elapsed_seconds: 0.1,
           items: [{ id }],
           raw_length: raw.length,
+        })
+      }
+      if (path === '/api/v1/add' && request.method === 'POST') {
+        const datasetId = /name="datasetId"\r\n\r\n([^\r]+)/.exec(request.body)?.[1] ?? ''
+        const texts = [...request.body.matchAll(/name="raw_data"\r\n\r\n([\s\S]*?)\r\n--/g)].map(
+          (match) => match[1] ?? '',
+        )
+        const items = data.get(datasetId) ?? []
+        for (const text of texts) {
+          const sequence = items.length + 1
+          const id = `3333333${sequence}-3333-4333-8333-333333333333`.slice(0, 36)
+          // The live instance stores md5(raw text) as contentHash.
+          items.push({ id, name: `text_${sequence}`, contentHash: md5(text) })
+        }
+        data.set(datasetId, items)
+        // Observed shape: one entry per submitted document, naming it text_<md5>.
+        return json({
+          status: 'PipelineRunCompleted',
+          dataset_id: datasetId,
+          data_ingestion_info: texts.map((text, index) => {
+            const item = items[items.length - texts.length + index]
+            return {
+              run_info: { status: 'PipelineRunCompleted', id: item?.id },
+              data_id: item?.id,
+              // Deliberately NOT md5(text): the live instance's name is not the
+              // raw-text hash for multi-line documents, so the adapter must not
+              // depend on it.
+              data_name: `text_${md5(`${text.length}:${index}`)}`,
+            }
+          }),
+          data_ids: items.slice(-texts.length).map((item) => item.id),
+        })
+      }
+      if (path === '/api/v1/cognify' && request.method === 'POST') {
+        const body = JSON.parse(request.body) as { datasetIds?: string[] }
+        const datasetId = body.datasetIds?.[0] ?? ''
+        state.cognifyBodies.push(body)
+        return json({
+          [datasetId]: {
+            status: 'PipelineRunCompleted',
+            pipeline_run_id: 'run-1',
+            dataset_id: datasetId,
+            data_ids: (data.get(datasetId) ?? []).map((item) => item.id),
+          },
         })
       }
       if (path === '/api/v1/search' && request.method === 'POST') {
@@ -445,5 +496,100 @@ describe('CogneeRestAdapter (verified live contract)', () => {
     expect(status.details?.errorCode).toBe('BACKEND')
     const health = await adapter.health()
     expect(health).toMatchObject({ ok: false, message: 'BACKEND' })
+  })
+})
+
+describe('CogneeRestAdapter.rememberBatch (batched ingest)', () => {
+  const inputs = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      text: `summary ${index}: the deploy window moved to Friday.`,
+      scope: project,
+      provenance: { kind: 'import' as const, source: 'segment-summary', recordedAt: '2026-01-01T00:00:00.000Z' },
+    }))
+
+  it('sends ONE add with every document and ONE cognify, mapping ids by content hash', async () => {
+    const fake = fakeCognee()
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const inputs10 = inputs(10)
+    const results = await adapter.rememberBatch(inputs10)
+
+    const adds = server.requests.filter((request) => request.url === '/api/v1/add')
+    const cognifies = server.requests.filter((request) => request.url === '/api/v1/cognify')
+    expect(adds).toHaveLength(1)
+    expect(cognifies).toHaveLength(1)
+    expect([...(adds[0]?.body ?? '').matchAll(/name="raw_data"/g)]).toHaveLength(10)
+    expect(server.requests.some((request) => request.url === '/api/v1/remember')).toBe(false)
+
+    expect(results).toHaveLength(10)
+    expect(results.every((result) => result.ok)).toBe(true)
+    const ids = new Set(results.map((result) => (result.ok ? result.id : 'missing')))
+    expect(ids.size).toBe(10)
+    for (const result of results) {
+      if (result.ok) expect(result.deduplicated).toBe(false)
+    }
+  })
+
+  it('passes the configured cognify parallelism knobs through the one cognify call', async () => {
+    const fake = fakeCognee()
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({
+      config: config(server.url, { ingestion: { queue: { cognify: { dataPerBatch: 5, chunksPerBatch: 36 } } } }),
+      env,
+    })
+    await adapter.rememberBatch(inputs(3))
+    expect(fake.cognifyBodies).toHaveLength(1)
+    expect(fake.cognifyBodies[0]).toMatchObject({ dataPerBatch: 5, chunksPerBatch: 36 })
+    expect(fake.cognifyBodies[0]?.dataPerBatch).toBe(5)
+  })
+
+  it('degrades to per-item remembers when a batch mixes scopes', async () => {
+    const fake = fakeCognee()
+    server = await startMockServer(fake.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const mixed = [
+      { ...inputs(1)[0]!, scope: project },
+      { ...inputs(1)[0]!, text: 'other scope summary', scope: other },
+    ]
+    const results = await adapter.rememberBatch(mixed)
+    expect(results).toHaveLength(2)
+    expect(results.every((result) => result.ok)).toBe(true)
+    expect(server.requests.filter((request) => request.url === '/api/v1/remember')).toHaveLength(2)
+    expect(server.requests.filter((request) => request.url === '/api/v1/add')).toHaveLength(0)
+  })
+})
+
+describe('CogneeRestAdapter.rememberBatch id mapping', () => {
+  it('maps ids from the /add response even when the data listing lags behind', async () => {
+    const fake = fakeCognee()
+    const inner = fake.handler
+    // Simulate the live instance's eventual consistency: the listing misses the
+    // rows that were just added, which is what silently broke the batch in the
+    // 1.0.8 production drain (23 of 25 unmapped).
+    const frozenList = new Map<string, Array<{ id: string; name: string; contentHash: string }>>()
+    const lagging = {
+      ...fake,
+      handler: (request: MockServerRequest) => {
+        const url = new URL(request.url ?? '/', 'http://mock')
+        const match = /^\/api\/v1\/datasets\/([^/]+)\/data$/.exec(url.pathname)
+        if (match?.[1] !== undefined && request.method === 'GET') {
+          if (!frozenList.has(match[1])) frozenList.set(match[1], [...(fake.data.get(match[1]) ?? [])])
+          return json(frozenList.get(match[1]) ?? [])
+        }
+        return inner(request)
+      },
+    }
+    server = await startMockServer(lagging.handler)
+    const adapter = new CogneeRestAdapter({ config: config(server.url), env })
+    const results = await adapter.rememberBatch(
+      Array.from({ length: 5 }, (_, index) => ({
+        text: `lagging summary ${index}`,
+        scope: project,
+        provenance: { kind: 'import' as const, source: 'segment-summary', recordedAt: '2026-01-01T00:00:00.000Z' },
+      })),
+    )
+    expect(results).toHaveLength(5)
+    expect(results.every((result) => result.ok)).toBe(true)
+    expect(new Set(results.map((result) => (result.ok ? result.id : 'x'))).size).toBe(5)
   })
 })

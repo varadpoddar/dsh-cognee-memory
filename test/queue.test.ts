@@ -212,6 +212,137 @@ describe('drain', () => {
     expect(summary.processed).toBeLessThan(6)
     expect(queue.status().counts.done + queue.status().counts.inflight).toBeLessThan(6)
   })
+
+  it('writes a batch of 3 with ONE backend call and marks all done', async () => {
+    const { filePath } = freshQueue()
+    const queue = IngestQueue.open({ filePath })
+    queue.enqueue(
+      Array.from({ length: 3 }, (_, index) => ({ text: `summary ${index}`, scope: scopeKeyValue, scopeRef })),
+    )
+    const batches: string[][] = []
+    const singles: string[] = []
+    const summary = await drainQueue({
+      queue,
+      batchSize: 3,
+      targets: [
+        {
+          name: 'gpu0',
+          write: async (item) => {
+            singles.push(item.id)
+          },
+          writeBatch: async (items) => {
+            batches.push(items.map((item) => item.id))
+            return items.map(() => ({ ok: true as const }))
+          },
+        },
+      ],
+      workers: 1,
+    })
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).toHaveLength(3)
+    expect(singles).toEqual([])
+    expect(summary.processed).toBe(3)
+    expect(summary.failed).toBe(0)
+    expect(summary.batches).toBe(1)
+    expect(summary.batchSize).toBe(3)
+    expect(queue.status().counts.done).toBe(3)
+    expect(queue.status().counts.inflight).toBe(0)
+  })
+
+  it('isolates a poison item: its neighbours stay done, it is retried alone', async () => {
+    const { filePath } = freshQueue()
+    const queue = IngestQueue.open({ filePath })
+    queue.enqueue(
+      Array.from({ length: 3 }, (_, index) => ({ text: `summary ${index}`, scope: scopeKeyValue, scopeRef })),
+    )
+    const poison = 'summary 1'
+    const retried: string[] = []
+    const summary = await drainQueue({
+      queue,
+      batchSize: 3,
+      targets: [
+        {
+          name: 'gpu0',
+          write: async (item) => {
+            retried.push(item.text)
+            throw new Error('still poison')
+          },
+          writeBatch: async (items) =>
+            items.map((item) =>
+              item.text === poison ? { ok: false as const, error: 'cognify refused one document' } : { ok: true as const },
+            ),
+        },
+      ],
+      workers: 1,
+    })
+    expect(retried).toEqual([poison])
+    expect(summary.processed).toBe(2)
+    expect(summary.failed).toBe(1)
+    expect(queue.status().counts.done).toBe(2)
+    const failed = queue.status().counts.pending + queue.status().counts.failed
+    expect(failed).toBe(1)
+    expect(queue.status().counts.inflight).toBe(0)
+  })
+
+  it('falls back to per-item writes when the whole batch throws', async () => {
+    const { filePath } = freshQueue()
+    const queue = IngestQueue.open({ filePath })
+    queue.enqueue(
+      Array.from({ length: 2 }, (_, index) => ({ text: `doc ${index}`, scope: scopeKeyValue, scopeRef })),
+    )
+    const written: string[] = []
+    const summary = await drainQueue({
+      queue,
+      batchSize: 2,
+      targets: [
+        {
+          name: 'gpu0',
+          write: async (item) => {
+            written.push(item.text)
+          },
+          writeBatch: async () => {
+            throw new Error('pipeline down')
+          },
+        },
+      ],
+      workers: 1,
+    })
+    expect(written.sort()).toEqual(['doc 0', 'doc 1'])
+    expect(summary.processed).toBe(2)
+    expect(summary.failed).toBe(0)
+    expect(queue.status().counts.done).toBe(2)
+  })
+
+  it('never calls writeBatch when batchSize is 1', async () => {
+    const { filePath } = freshQueue()
+    const queue = IngestQueue.open({ filePath })
+    queue.enqueue(
+      Array.from({ length: 2 }, (_, index) => ({ text: `solo ${index}`, scope: scopeKeyValue, scopeRef })),
+    )
+    let batchCalls = 0
+    let singleCalls = 0
+    const summary = await drainQueue({
+      queue,
+      batchSize: 1,
+      targets: [
+        {
+          name: 'gpu0',
+          write: async () => {
+            singleCalls += 1
+          },
+          writeBatch: async (items) => {
+            batchCalls += 1
+            return items.map(() => ({ ok: true as const }))
+          },
+        },
+      ],
+      workers: 1,
+    })
+    expect(batchCalls).toBe(0)
+    expect(singleCalls).toBe(2)
+    expect(summary.batchSize).toBe(1)
+    expect(summary.processed).toBe(2)
+  })
 })
 
 describe('endpoint specs', () => {

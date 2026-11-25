@@ -180,6 +180,34 @@ export const CogneeMemoryConfigSchema = z
             maxAttempts: z.number().int().min(1).max(1_000_000).default(1_000_000),
             /** How long a completed task's hash stays for replay idempotency. */
             tombstoneRetentionDays: z.number().int().min(1).max(3_650).default(30),
+            /**
+             * Summaries per backend pipeline run. Cognee's cognify dominates the
+             * drain (~45-60 s per run regardless of how many documents the run
+             * covers), so the drain `add`s up to this many tasks and issues ONE
+             * cognify. `1` restores the per-item path used for correctness
+             * comparisons (measured 1.28 items/min vs 27.8 items/min at 25).
+             */
+            ingestBatchSize: z.number().int().min(1).max(200).default(25),
+            /**
+             * Wall-clock budget for ONE batched pipeline run (add + cognify +
+             * status polling). A 25-summary cognify measured 200-450 s on the
+             * varad instance, far beyond `ingestion.timeoutMs` (the interactive
+             * 180 s budget), so the batched path needs its own ceiling.
+             */
+            batchTimeoutMs: z.number().int().min(1_000).max(3_600_000).default(1_800_000),
+            /**
+             * Parallelism passed to the batched `/cognify` call. Cognee's
+             * pipeline processes data items (and chunks) one at a time by
+             * default; on a GPU server that accepts concurrent requests this is
+             * the difference between ~20 s and ~5 s of wall time per summary.
+             * Unset means "pipeline default" (sequential).
+             */
+            cognify: z
+              .object({
+                dataPerBatch: z.number().int().min(1).max(64).optional(),
+                chunksPerBatch: z.number().int().min(1).max(1_000).optional(),
+              })
+              .prefault({}),
           })
           .prefault({}),
       })

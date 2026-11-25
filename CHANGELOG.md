@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.0.8 — 2026-11-25
+
+Batched ingest: the drain now `add`s a batch of summaries and runs ONE
+`cognify`, instead of one add+cognify per summary.
+
+- **`ingestion.queue.ingestBatchSize`** (default 25, max 200): the drain claims
+  up to N tasks, `POST /add`s every text in one multipart request, then runs a
+  single `POST /cognify` for the dataset and polls once. Measured on the varad
+  instance against real summaries: 1 summary 57.5 s (1.04 items/min), 10
+  summaries 199.7 s (3.0 items/min) with `add` alone taking 1.05 s. Setting
+  `ingestBatchSize: 1` restores the per-item path used for comparisons.
+- **`ingestion.queue.batchTimeoutMs`** (default 1 800 000): the batched
+  add/cognify requests and their status poll get this budget. The interactive
+  budgets (request 120 s, ingestion 180 s) are shorter than one 10-summary
+  cognify, so reusing them would have failed every large batch.
+- **`ingestion.queue.cognify.dataPerBatch` / `chunksPerBatch`** (unset =
+  pipeline default): Cognee processes data items sequentially by default; these
+  pass its own parallelism knobs through the batched cognify call.
+- **Per-item failure isolation**: a summary the batch reports failed — or a
+  batch whose call throws — is retried on its own (`DrainTarget.writeBatch`
+  returns one outcome per item; the drain falls back to `write`). Every claimed
+  task is still resolved, so no lease is left `inflight`.
+- **Provenance is unchanged per item**: redaction, dedup admission, the
+  provenance index (pointer header included) and the ledger row are recorded for
+  each summary either way, because `MemoryCoordinator.remember` and
+  `rememberBatch` share one admission path and one side-effect writer.
+- **Incremental cognify is safe on a shared dataset**: adding 5 summaries to a
+  15-item dataset and cognifying took 81.5 s, not the ~300 s a full re-cognify
+  of all 15 would need — Cognee only processes data that is not yet cognified.
+- **Batch→id mapping comes from the `/add` response, in input order.** The live
+  instance's `data_name` is `text_<hash>` but that hash is NOT the md5 of a
+  multi-line summary (it matched short ASCII text and did not match real 3 KB
+  summaries), and the dataset listing is eventually consistent — the first
+  production run mapped 0 of 10 and silently fell back to per-item deduped
+  writes, which marked the queue items done without provenance rows. A short
+  add/listing mismatch now fails the batch loudly instead of degrading it.
+- Verified retrieval on the batched records: 10/10 answered a `CHUNKS_LEXICAL`
+  query with their pointer header (session id + content hash) intact, 10/10
+  answered `CHUNKS` (one body-phrase probe missed at the top-20 cut), 25/25
+  for the isolated 25-item batch, and the panel resolved a batched pointer to
+  `session 65bd719d turn 1-2, chars 2390-7845` with `hashMatches: true`.
+- Measured on the varad instance (backfill still running, same GPU):
+  1 summary 57.5 s; 10 summaries 199.7 s isolated / **155.2 s in the real
+  drain** (3.9 items/min); 25 summaries 442.4 s isolated / **325.8 s in the
+  real drain** (4.6 items/min). ~3-4.5x the per-item path.
+
 ## 1.0.7 — 2026-11-25
 
 Summary throughput: the summarizer now disables Qwen3-style reasoning.

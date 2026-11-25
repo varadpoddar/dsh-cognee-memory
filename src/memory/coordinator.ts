@@ -3,12 +3,14 @@ import type { CogneeMemoryConfig } from '../config/schema.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type {
   AdapterStatus,
+  BatchRememberResult,
   CallerIdentity,
   HealthResult,
   JsonValue,
   MemoryAdapter,
   Provenance,
   RecallHit,
+  RememberInput,
   RememberResult,
   ScopeRef,
 } from '../types.js'
@@ -64,6 +66,43 @@ export interface RememberRequest {
   readonly sourceRefs?: readonly LedgerSourceRef[]
   readonly signal?: AbortSignal
 }
+
+/**
+ * Outcome of one request inside `MemoryCoordinator.rememberBatch`. Positional
+ * with the input array; `permanent` means a retry cannot fix it.
+ */
+export type RememberBatchOutcome =
+  | {
+      readonly ok: true
+      readonly id: string
+      readonly createdAt: string
+      readonly deduplicated: boolean
+    }
+  | { readonly ok: false; readonly error: string; readonly permanent?: boolean }
+
+/** A write that passed admission and still needs the backend pipeline run. */
+interface PreparedRememberWrite {
+  readonly text: string
+  readonly identity: CallerIdentity
+  readonly scope: ScopeRef
+  readonly provenance: Provenance
+  readonly tags?: readonly string[]
+  readonly dedupeKey: string
+  readonly semanticKey?: string
+  readonly supersedes?: string
+  readonly sourceRefs?: readonly LedgerSourceRef[]
+  readonly signal?: AbortSignal
+  readonly redacted?: boolean
+}
+
+/** Write-side refusals no retry can fix; mirrors the drain's rule. */
+const PERMANENT_WRITE_CODES: ReadonlySet<string> = new Set([
+  'FORBIDDEN',
+  'VALIDATION',
+  'UNAUTHORIZED',
+  'NOT_FOUND',
+  'UNSUPPORTED_OPERATION',
+])
 
 export interface ForgetRequest {
   readonly id: string
@@ -187,6 +226,141 @@ export class MemoryCoordinator {
   }
 
   async remember(request: RememberRequest): Promise<RememberResult> {
+    try {
+      const admitted = await this.admitRemember(request)
+      if (admitted.kind === 'done') return admitted.result
+      const result = await this.adapter.remember(this.preparedInput(admitted.prepared))
+      this.recordPreparedWrite(admitted.prepared, result)
+      return result
+    } catch (error) {
+      this.metrics?.increment('remember.failures')
+      const normalized = isMemoryError(error) ? error : toMemoryError(error, 'BACKEND')
+      this.metrics?.recordError(normalized.code)
+      throw normalized
+    }
+  }
+
+  /**
+   * Batched durable write for the drain. Every request goes through the same
+   * identity/scope/policy/dedup admission as `remember`; the survivors are then
+   * covered by ONE adapter batch call (`add` all + a single `cognify`), and each
+   * item still gets its own dedup entry, provenance row and ledger row.
+   *
+   * Failures are returned per item, never thrown, so one bad document cannot
+   * fail its neighbours. A batch-level throw marks every survivor failed and
+   * the caller retries them individually.
+   */
+  async rememberBatch(requests: readonly RememberRequest[]): Promise<readonly RememberBatchOutcome[]> {
+    const outcomes: (RememberBatchOutcome | undefined)[] = new Array(requests.length).fill(undefined)
+    const ready: { readonly index: number; readonly prepared: PreparedRememberWrite }[] = []
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index]
+      if (request === undefined) continue
+      try {
+        const admitted = await this.admitRemember(request)
+        if (admitted.kind === 'done') {
+          outcomes[index] = {
+            ok: true,
+            id: admitted.result.id,
+            createdAt: admitted.result.createdAt,
+            deduplicated: true,
+          }
+          continue
+        }
+        ready.push({ index, prepared: admitted.prepared })
+      } catch (error) {
+        this.metrics?.increment('remember.failures')
+        const normalized = isMemoryError(error) ? error : toMemoryError(error, 'BACKEND')
+        this.metrics?.recordError(normalized.code)
+        outcomes[index] = {
+          ok: false,
+          error: normalized.message,
+          ...(PERMANENT_WRITE_CODES.has(normalized.code) ? { permanent: true } : {}),
+        }
+      }
+    }
+    if (ready.length > 0) {
+      const inputs = ready.map((entry) => this.preparedInput(entry.prepared))
+      let results: readonly BatchRememberResult[] = []
+      if (this.adapter.rememberBatch !== undefined) {
+        try {
+          results = await this.adapter.rememberBatch(inputs)
+        } catch (error) {
+          const normalized = isMemoryError(error) ? error : toMemoryError(error, 'BACKEND')
+          this.metrics?.recordError(normalized.code)
+          for (const entry of ready) {
+            outcomes[entry.index] = {
+              ok: false,
+              error: normalized.message,
+              ...(PERMANENT_WRITE_CODES.has(normalized.code) ? { permanent: true } : {}),
+            }
+          }
+          // Every survivor is failed with the batch error: the caller retries
+          // them individually, which is the whole point of failing the batch.
+          return requests.map(
+            (_, index): RememberBatchOutcome =>
+              outcomes[index] ?? { ok: false, error: normalized.message },
+          )
+        }
+      } else {
+        const sequential: BatchRememberResult[] = []
+        for (const input of inputs) {
+          try {
+            sequential.push({ ok: true, ...(await this.adapter.remember(input)) })
+          } catch (error) {
+            sequential.push({
+              ok: false,
+              error: (isMemoryError(error) ? error : toMemoryError(error, 'BACKEND')).message,
+            })
+          }
+        }
+        results = sequential
+      }
+      for (let index = 0; index < ready.length; index += 1) {
+        const entry = ready[index]
+        if (entry === undefined) continue
+        const result = results[index]
+        if (result === undefined || !result.ok) {
+          outcomes[entry.index] = {
+            ok: false,
+            error: result === undefined ? 'batch result missing' : result.error,
+            ...(result !== undefined && !result.ok && result.permanent === true ? { permanent: true } : {}),
+          }
+          continue
+        }
+        this.recordPreparedWrite(entry.prepared, {
+          id: result.id,
+          scope: result.scope,
+          createdAt: result.createdAt,
+          deduplicated: result.deduplicated,
+        })
+        outcomes[entry.index] = {
+          ok: true,
+          id: result.id,
+          createdAt: result.createdAt,
+          deduplicated: result.deduplicated,
+        }
+      }
+    }
+    // Positional: the drain pairs outcomes with the items it claimed.
+    return requests.map(
+      (_, index): RememberBatchOutcome =>
+        outcomes[index] ?? { ok: false, error: 'write admission produced no outcome' },
+    )
+  }
+
+  /**
+   * Shared admission for `remember` and `rememberBatch`: identity, scope,
+   * policy, then the two dedup gates. Returns a finished result when the write
+   * is a duplicate (or session-ephemeral), otherwise the prepared write.
+   */
+  private async admitRemember(
+    request: RememberRequest,
+  ):
+    Promise<
+      | { readonly kind: 'done'; readonly result: RememberResult }
+      | { readonly kind: 'ready'; readonly prepared: PreparedRememberWrite }
+    > {
     const identity = await this.identityResolver.resolve(request.identity)
     const scope = await this.resolveScope(identity, request.scopeName)
     const policy = await this.policyFor(identity)
@@ -200,145 +374,172 @@ export class MemoryCoordinator {
     if (!decision.allowed) throw decision.error
 
     this.metrics?.increment('remember.requests')
-    try {
-      if (scope.scope === 'session') {
-        const sessionId = request.provenance.sessionId ?? identity.sessionId
-        if (sessionId === undefined || sessionId === '') {
-          throw new MemoryError('VALIDATION', 'session memory requires a session id')
-        }
-        this.metrics?.increment('remember.ephemeral')
-        return this.ephemeral.remember({
-          text: decision.text,
-          scope,
-          provenance: { ...request.provenance, sessionId },
-          ...(request.tags === undefined ? {} : { tags: request.tags }),
-        })
+    if (scope.scope === 'session') {
+      const sessionId = request.provenance.sessionId ?? identity.sessionId
+      if (sessionId === undefined || sessionId === '') {
+        throw new MemoryError('VALIDATION', 'session memory requires a session id')
       }
-      const threshold = this.config.dedup.nearDuplicateThreshold
-      const local = this.dedup.findNear(scope, decision.text, threshold)
-      if (local !== undefined) {
-        this.metrics?.increment('remember.deduplicated')
-        return {
+      this.metrics?.increment('remember.ephemeral')
+      const result = await this.ephemeral.remember({
+        text: decision.text,
+        scope,
+        provenance: { ...request.provenance, sessionId },
+        ...(request.tags === undefined ? {} : { tags: request.tags }),
+      })
+      return { kind: 'done', result }
+    }
+    const threshold = this.config.dedup.nearDuplicateThreshold
+    const local = this.dedup.findNear(scope, decision.text, threshold)
+    if (local !== undefined) {
+      this.metrics?.increment('remember.deduplicated')
+      return {
+        kind: 'done',
+        result: {
           id: local.id,
           scope,
           createdAt: local.createdAt ?? nowIso(this.clock),
           deduplicated: true,
-        }
+        },
       }
+    }
 
-      const candidates = await this.adapter
-        .recall({
-          text: decision.text,
-          scopes: [scope],
-          limit: this.config.dedup.candidateLimit,
-          ...(request.signal === undefined ? {} : { signal: request.signal }),
-        })
-        .catch((error: unknown) => {
-          // Dedup is best-effort; a read failure must not fabricate a duplicate.
-          const normalized = toMemoryError(error, 'BACKEND')
-          this.metrics?.recordError(normalized.code)
-          return []
-        })
-      const duplicate = findNearDuplicate(
-        decision.text,
-        candidates
-          .filter((hit) => sameScope(hit.record.scope, scope))
-          .map((hit) => ({
-            id: hit.record.id,
-            text: hit.record.text,
-            scope: hit.record.scope,
-            createdAt: hit.record.createdAt,
-          })),
-        threshold,
-      )
-      if (duplicate !== undefined) {
-        this.metrics?.increment('remember.deduplicated')
-        return {
+    const candidates = await this.adapter
+      .recall({
+        text: decision.text,
+        scopes: [scope],
+        limit: this.config.dedup.candidateLimit,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      })
+      .catch((error: unknown) => {
+        // Dedup is best-effort; a read failure must not fabricate a duplicate.
+        const normalized = toMemoryError(error, 'BACKEND')
+        this.metrics?.recordError(normalized.code)
+        return []
+      })
+    const duplicate = findNearDuplicate(
+      decision.text,
+      candidates
+        .filter((hit) => sameScope(hit.record.scope, scope))
+        .map((hit) => ({
+          id: hit.record.id,
+          text: hit.record.text,
+          scope: hit.record.scope,
+          createdAt: hit.record.createdAt,
+        })),
+      threshold,
+    )
+    if (duplicate !== undefined) {
+      this.metrics?.increment('remember.deduplicated')
+      return {
+        kind: 'done',
+        result: {
           id: duplicate.id,
           scope,
           createdAt: duplicate.createdAt ?? nowIso(this.clock),
           deduplicated: true,
-        }
+        },
       }
+    }
 
-      const tags = sanitizeTags(request.tags)
-      const result = await this.adapter.remember({
+    const tags = sanitizeTags(request.tags)
+    return {
+      kind: 'ready',
+      prepared: {
         text: decision.text,
+        identity,
         scope,
         provenance: request.provenance,
         dedupeKey: request.dedupeKey ?? decision.dedupeKey,
-        ...(tags === undefined ? {} : { tags }),
-        ...(request.signal === undefined ? {} : { signal: request.signal }),
-        metadata: {
-          dedupeKey: request.dedupeKey ?? decision.dedupeKey,
-          provenanceKind: request.provenance.kind,
-          ...(decision.redacted ? { redacted: true } : {}),
-        },
-      })
-      this.dedup.add({ id: result.id, text: decision.text, scope, createdAt: result.createdAt })
-      if (this.provenanceIndex !== undefined) {
-        try {
-          // A segment summary carries its transcript pointer in the document
-          // header. Indexing it is what gives the panel a Source section with
-          // the exact turn/char range; without it the page can only name the
-          // session.
-          const summaryDocument = parseSummaryDocument(decision.text)
-          this.provenanceIndex.recordWrite({
-            id: result.id,
-            scope,
-            identity,
-            createdAt: result.createdAt,
-            text: decision.text,
-            ...(summaryDocument === undefined ? {} : { pointer: summaryDocument.pointer }),
-            ...(request.semanticKey === undefined ? {} : { semanticKey: request.semanticKey }),
-            ...(request.supersedes === undefined ? {} : { supersedes: request.supersedes }),
-            provenance: request.provenance,
-            state: 'indexed',
-          })
-          if (request.supersedes !== undefined) {
-            this.provenanceIndex.markSuperseded(request.supersedes, result.id)
-          }
-        } catch {
-          this.metrics?.increment('provenance.record.failures')
+        tags,
+        semanticKey: request.semanticKey,
+        supersedes: request.supersedes,
+        sourceRefs: request.sourceRefs,
+        signal: request.signal,
+        redacted: decision.redacted,
+      },
+    }
+  }
+
+  /** Adapter input for a prepared write (single and batched paths share it). */
+  private preparedInput(prepared: PreparedRememberWrite): RememberInput {
+    return {
+      text: prepared.text,
+      scope: prepared.scope,
+      provenance: prepared.provenance,
+      dedupeKey: prepared.dedupeKey,
+      ...(prepared.tags === undefined ? {} : { tags: prepared.tags }),
+      ...(prepared.signal === undefined ? {} : { signal: prepared.signal }),
+      metadata: {
+        dedupeKey: prepared.dedupeKey,
+        provenanceKind: prepared.provenance.kind,
+        ...(prepared.redacted ? { redacted: true } : {}),
+      },
+    }
+  }
+
+  /**
+   * Side effects of one durable write: local dedup, provenance index (with the
+   * summary pointer the panel reads), and the export ledger. Both write paths go
+   * through here so a batched item is indistinguishable from a single one.
+   */
+  private recordPreparedWrite(prepared: PreparedRememberWrite, result: RememberResult): void {
+    this.dedup.add({ id: result.id, text: prepared.text, scope: prepared.scope, createdAt: result.createdAt })
+    if (this.provenanceIndex !== undefined) {
+      try {
+        // A segment summary carries its transcript pointer in the document
+        // header. Indexing it is what gives the panel a Source section with
+        // the exact turn/char range; without it the page can only name the
+        // session.
+        const summaryDocument = parseSummaryDocument(prepared.text)
+        this.provenanceIndex.recordWrite({
+          id: result.id,
+          scope: prepared.scope,
+          identity: prepared.identity,
+          createdAt: result.createdAt,
+          text: prepared.text,
+          ...(summaryDocument === undefined ? {} : { pointer: summaryDocument.pointer }),
+          ...(prepared.semanticKey === undefined ? {} : { semanticKey: prepared.semanticKey }),
+          ...(prepared.supersedes === undefined ? {} : { supersedes: prepared.supersedes }),
+          provenance: prepared.provenance,
+          state: 'indexed',
+        })
+        if (prepared.supersedes !== undefined) {
+          this.provenanceIndex.markSuperseded(prepared.supersedes, result.id)
         }
+      } catch {
+        this.metrics?.increment('provenance.record.failures')
       }
-      if (this.ledger !== undefined) {
-        try {
-          const sourceRefs =
-            request.sourceRefs ??
-            (request.provenance.sessionId === undefined
-              ? []
-              : [
-                  {
-                    sessionId: request.provenance.sessionId,
-                    messageIndex: request.provenance.turn ?? 0,
-                    producedAt: result.createdAt,
-                  },
-                ])
-          this.ledger.recordWrite({
-            recordId: result.id,
-            scope,
-            text: decision.text,
-            ...(request.semanticKey === undefined ? {} : { semanticKey: request.semanticKey }),
-            provenance: request.provenance,
-            sourceRefs,
-            createdAt: result.createdAt,
-            ...(request.supersedes === undefined ? {} : { supersedes: request.supersedes }),
-            ...(decision.redacted ? { redacted: true } : {}),
-          })
-          if (request.supersedes !== undefined) {
-            this.ledger.markSuperseded(request.supersedes, result.id)
-          }
-        } catch {
-          this.metrics?.increment('provenance.record.failures')
+    }
+    if (this.ledger !== undefined) {
+      try {
+        const sourceRefs =
+          prepared.sourceRefs ??
+          (prepared.provenance.sessionId === undefined
+            ? []
+            : [
+                {
+                  sessionId: prepared.provenance.sessionId,
+                  messageIndex: prepared.provenance.turn ?? 0,
+                  producedAt: result.createdAt,
+                },
+              ])
+        this.ledger.recordWrite({
+          recordId: result.id,
+          scope: prepared.scope,
+          text: prepared.text,
+          ...(prepared.semanticKey === undefined ? {} : { semanticKey: prepared.semanticKey }),
+          provenance: prepared.provenance,
+          sourceRefs,
+          createdAt: result.createdAt,
+          ...(prepared.supersedes === undefined ? {} : { supersedes: prepared.supersedes }),
+          ...(prepared.redacted ? { redacted: true } : {}),
+        })
+        if (prepared.supersedes !== undefined) {
+          this.ledger.markSuperseded(prepared.supersedes, result.id)
         }
+      } catch {
+        this.metrics?.increment('provenance.record.failures')
       }
-      return result
-    } catch (error) {
-      this.metrics?.increment('remember.failures')
-      const normalized = isMemoryError(error) ? error : toMemoryError(error, 'BACKEND')
-      this.metrics?.recordError(normalized.code)
-      throw normalized
     }
   }
 

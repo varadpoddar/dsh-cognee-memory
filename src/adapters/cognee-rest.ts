@@ -4,6 +4,7 @@ import { scopeKey } from '../memory/scopes.js'
 import type { Metrics } from '../telemetry/metrics.js'
 import type {
   AdapterStatus,
+  BatchRememberResult,
   ForgetInput,
   ForgetResult,
   HealthResult,
@@ -24,6 +25,7 @@ import {
 import { COGNEE_PATHS } from './cognee-paths.js'
 import {
   contentHashOf,
+  dataIdsInOrder,
   isRecord,
   localId,
   parseDataList,
@@ -157,6 +159,158 @@ export class CogneeRestAdapter implements MemoryAdapter {
       createdAt: parsed.createdAt,
       deduplicated,
     }
+  }
+
+  /**
+   * Batched write: `/add` every document in ONE multipart request, run ONE
+   * `/cognify` for the dataset, then map each input to the data id Cognee
+   * assigned (by content hash).
+   *
+   * Why: `/remember` is add+cognify, and cognify is the expensive half
+   * (~45-60 s measured on the varad instance). Twenty-five summaries in one
+   * pipeline pass cost roughly one cognify instead of twenty-five.
+   *
+   * Inputs are expected to share a scope (a drain batch comes from one queue
+   * scope). A mixed-scope call degrades to per-item `/remember` — correct, and
+   * never silently written into the wrong dataset.
+   */
+  async rememberBatch(inputs: readonly RememberInput[]): Promise<readonly BatchRememberResult[]> {
+    if (inputs.length === 0) return []
+    const first = inputs[0]
+    if (first === undefined) return []
+    const sameScope = inputs.every(
+      (input) => input.scope.scope === first.scope.scope && input.scope.id === first.scope.id,
+    )
+    if (!sameScope || inputs.length === 1) return this.rememberOneByOne(inputs)
+    if (first.scope.scope === 'session') {
+      throw new MemoryError('VALIDATION', 'session memory is ephemeral and never written to Cognee')
+    }
+
+    const nowIso = new Date(this.now()).toISOString()
+    const signal = first.signal
+    const dataset = await this.registry.ensure(first.scope, signal)
+    const before = await this.listDataIds(dataset.id, signal)
+
+    const form = new FormData()
+    for (const input of inputs) form.append('raw_data', input.text)
+    form.set('datasetId', dataset.id)
+    const tags = first.tags
+    if (
+      tags !== undefined &&
+      tags.length > 0 &&
+      inputs.every(
+        (input) =>
+          input.tags !== undefined &&
+          input.tags.length === tags.length &&
+          input.tags.every((tag, index) => tag === tags[index]),
+      )
+    ) {
+      form.set('node_set', JSON.stringify(tags))
+    }
+
+    let added: unknown
+    try {
+      added = await this.client.requestJson({
+        method: 'POST',
+        path: COGNEE_PATHS.add,
+        form,
+        operation: 'add',
+        timeoutMs: this.batchTimeoutMs(),
+        maxRetries: 0,
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch (error) {
+      const normalized = toMemoryError(error, 'BACKEND')
+      if (normalized.code === 'NOT_FOUND' || normalized.code === 'FORBIDDEN') this.registry.invalidate()
+      throw normalized
+    }
+    const parsedAdd = parseRememberResponse(added, first.scope, fallbackId(first), nowIso)
+    if (parsedAdd.datasetId !== undefined && parsedAdd.datasetId !== dataset.id) {
+      throw new MemoryError('BACKEND', 'Cognee acknowledged an add against a different dataset', {
+        details: { requested: dataset.id },
+      })
+    }
+
+    // One pipeline pass for the whole batch. Dataset-level only: Cognee 1.6.10's
+    // cognify payload carries `datasets`/`datasetIds`, not data ids.
+    const cognifyBody: Record<string, unknown> = { datasetIds: [dataset.id] }
+    if (this.config.ingestion.queue.cognify.dataPerBatch !== undefined) {
+      cognifyBody.dataPerBatch = this.config.ingestion.queue.cognify.dataPerBatch
+    }
+    if (this.config.ingestion.queue.cognify.chunksPerBatch !== undefined) {
+      cognifyBody.chunksPerBatch = this.config.ingestion.queue.cognify.chunksPerBatch
+    }
+    await this.client.requestJson({
+      method: 'POST',
+      path: COGNEE_PATHS.cognify,
+      body: cognifyBody,
+      operation: 'cognify',
+      timeoutMs: this.batchTimeoutMs(),
+      maxRetries: 0,
+      ...(signal === undefined ? {} : { signal }),
+    })
+    // Completion is derived from status, never from the 2xx.
+    await this.awaitIngestion(dataset.id, signal, this.batchTimeoutMs())
+
+    // Map each input to the id Cognee assigned for THIS call. The /add response
+    // lists one entry per submitted document in input order; that order is the
+    // authoritative mapping. Do NOT derive it from `data_name` (it is not the
+    // md5 of a multi-line summary) or from the dataset listing (eventually
+    // consistent: it missed 23 of 25 rows right after a large add, which
+    // silently degraded the batch into per-item deduped writes with no
+    // provenance rows).
+    const ids = dataIdsInOrder(added)
+    if (ids.length !== inputs.length) {
+      throw new MemoryError(
+        'BACKEND',
+        'Cognee acknowledged fewer documents than were added in this batch',
+        { details: { submitted: inputs.length, acknowledged: ids.length } },
+      )
+    }
+    return inputs.map((input, index): BatchRememberResult => {
+      const id = ids[index] ?? ''
+      if (id === '') {
+        return { ok: false, error: 'Cognee acknowledged this document without a data id' }
+      }
+      return {
+        ok: true,
+        id,
+        scope: input.scope,
+        createdAt: nowIso,
+        deduplicated: before.has(id),
+      }
+    })
+  }
+
+  /** Per-item fallback for a mixed-scope or single-input batch. */
+  private async rememberOneByOne(
+    inputs: readonly RememberInput[],
+  ): Promise<readonly BatchRememberResult[]> {
+    const results: BatchRememberResult[] = []
+    for (const input of inputs) {
+      try {
+        const result = await this.remember(input)
+        results.push({ ok: true, ...result })
+      } catch (error) {
+        const normalized = toMemoryError(error, 'BACKEND')
+        results.push({ ok: false, error: normalized.message })
+      }
+    }
+    return results
+  }
+
+  /**
+   * A batched pipeline run outlives the interactive budgets (request 120 s,
+   * ingestion 180 s): one 10-summary cognify measured 199 s and 25 summaries
+   * take longer still. The add/cognify requests and their poll share this
+   * ceiling.
+   */
+  private batchTimeoutMs(): number {
+    return Math.max(
+      this.config.ingestion.queue.batchTimeoutMs,
+      this.config.ingestion.timeoutMs,
+      this.config.requestTimeoutMs,
+    )
   }
 
   async recall(query: RecallQuery): Promise<readonly RecallHit[]> {
@@ -399,8 +553,12 @@ export class CogneeRestAdapter implements MemoryAdapter {
    * complete. Throws BACKEND on a reported failure and TIMEOUT on budget expiry,
    * because a write that is not searchable is not a completed write.
    */
-  private async awaitIngestion(datasetId: string, signal?: AbortSignal): Promise<void> {
-    const deadline = this.now() + this.config.ingestion.timeoutMs
+  private async awaitIngestion(
+    datasetId: string,
+    signal?: AbortSignal,
+    budgetMs?: number,
+  ): Promise<void> {
+    const deadline = this.now() + (budgetMs ?? this.config.ingestion.timeoutMs)
     let lastState: string | undefined
     for (;;) {
       const memoryResponse = await this.client.requestJson<unknown>({

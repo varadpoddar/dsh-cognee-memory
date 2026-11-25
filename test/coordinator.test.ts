@@ -214,3 +214,81 @@ describe('MemoryCoordinator provenance wiring', () => {
     expect(recorded).toEqual([['mem-9']])
   })
 })
+
+describe('MemoryCoordinator.rememberBatch', () => {
+  const twoRequests = () => [
+    { text: 'first summary', identity: identity(), provenance },
+    { text: 'second summary', identity: identity(), provenance },
+  ]
+
+  it('covers a batch with ONE adapter pipeline run and returns per-item outcomes', async () => {
+    const harness = createHarness({
+      rememberBatch: async (inputs) =>
+        inputs.map((input, index) => ({
+          ok: true as const,
+          id: `mem-batch-${index}`,
+          scope: input.scope,
+          createdAt: FIXED_NOW,
+          deduplicated: false,
+        })),
+    })
+    const writes: { id: string }[] = []
+    const coordinator = new MemoryCoordinator({
+      adapter: harness.adapter,
+      config: harness.config,
+      clock: () => new Date(FIXED_NOW),
+      provenanceIndex: {
+        recordWrite: (entry) => {
+          writes.push({ id: entry.id })
+        },
+        markSuperseded: () => undefined,
+        recordRecall: () => undefined,
+      },
+    })
+    const outcomes = await coordinator.rememberBatch(twoRequests())
+    expect(outcomes).toHaveLength(2)
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true)
+    expect(harness.calls.batch).toHaveLength(1)
+    expect(harness.calls.batch[0]).toHaveLength(2)
+    // The single-item path was never used, yet every item got a provenance row.
+    expect(harness.calls.remember).toHaveLength(0)
+    expect(writes.map((write) => write.id)).toEqual(['mem-batch-0', 'mem-batch-1'])
+  })
+
+  it('reports one failed item without failing its neighbour', async () => {
+    const harness = createHarness({
+      rememberBatch: async (inputs) =>
+        inputs.map((input, index) =>
+          index === 1
+            ? { ok: false as const, error: 'cognify rejected one document' }
+            : { ok: true as const, id: 'mem-batch-0', scope: input.scope, createdAt: FIXED_NOW, deduplicated: false },
+        ),
+    })
+    const outcomes = await harness.coordinator.rememberBatch(twoRequests())
+    expect(outcomes[0]).toMatchObject({ ok: true, id: 'mem-batch-0' })
+    expect(outcomes[1]).toMatchObject({ ok: false, error: 'cognify rejected one document' })
+  })
+
+  it('falls back to per-item writes when the adapter has no batch support', async () => {
+    const harness = createHarness()
+    const outcomes = await harness.coordinator.rememberBatch(twoRequests())
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true)
+    expect(harness.calls.batch).toHaveLength(0)
+    expect(harness.calls.remember).toHaveLength(2)
+  })
+
+  it('keeps outcomes positional and retryable when the whole batch throws', async () => {
+    const harness = createHarness({
+      rememberBatch: async () => {
+        throw new MemoryError('BACKEND', 'pipeline down')
+      },
+    })
+    const outcomes = await harness.coordinator.rememberBatch(twoRequests())
+    expect(outcomes).toHaveLength(2)
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true)
+    expect(outcomes.map((outcome) => (outcome.ok ? '' : outcome.error))).toEqual([
+      'pipeline down',
+      'pipeline down',
+    ])
+  })
+})
