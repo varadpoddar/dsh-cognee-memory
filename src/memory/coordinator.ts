@@ -19,6 +19,7 @@ import { EphemeralSessionMemory } from './ephemeral.js'
 import { IdentityResolver } from './identity.js'
 import { RecallService, type RecallRequest } from './recall.js'
 import { scopeFromName, sameScope, scopesForIdentity } from './scopes.js'
+import { parseSummaryDocument } from './pointer.js'
 import type { ProvenanceIndex } from './provenance-index.js'
 import type { LedgerSourceRef, MemoryLedger } from './ledger.js'
 import { evaluateWrite } from './write-policy.js'
@@ -277,12 +278,18 @@ export class MemoryCoordinator {
       this.dedup.add({ id: result.id, text: decision.text, scope, createdAt: result.createdAt })
       if (this.provenanceIndex !== undefined) {
         try {
+          // A segment summary carries its transcript pointer in the document
+          // header. Indexing it is what gives the panel a Source section with
+          // the exact turn/char range; without it the page can only name the
+          // session.
+          const summaryDocument = parseSummaryDocument(decision.text)
           this.provenanceIndex.recordWrite({
             id: result.id,
             scope,
             identity,
             createdAt: result.createdAt,
             text: decision.text,
+            ...(summaryDocument === undefined ? {} : { pointer: summaryDocument.pointer }),
             ...(request.semanticKey === undefined ? {} : { semanticKey: request.semanticKey }),
             ...(request.supersedes === undefined ? {} : { supersedes: request.supersedes }),
             provenance: request.provenance,
