@@ -267,4 +267,25 @@ describe('RetrievalCoordinator', () => {
     expect(block.text).toContain('- gamma · project · 2026-01-01')
     expect(block.text).not.toContain('untrusted')
   })
+
+  it('drops the pointer header so summary prose and its link fit the line', () => {
+    const header =
+      '[[dsh-memory-pointer {"session_id":"s-1","turn_start":1,"turn_end":2,' +
+      '"segment_index":1,"content_hash":"' + 'a'.repeat(64) + '","char_start":0,' +
+      '"char_end":900,"model":"unsloth/Qwen3.8-27B-GGUF","prompt_version":"1"}]]'
+    const text =
+      `${header}\n\nSeaweedFS runs on CT2001 at 10.20.10.21; S3 on 8333 and the ` +
+      'filer is exposed at https://seaweed.nomad.opsc.io.'
+    const block = formatMemoryBlock([hit('mem-9', text)], {
+      maxTokens: 500,
+      maxItems: 1,
+      publicBaseUrl: 'https://dsh.nomad.opsc.io',
+    })
+    expect(block.text).not.toContain('dsh-memory-pointer')
+    expect(block.text).not.toContain('content_hash')
+    expect(block.text).toContain('10.20.10.21')
+    expect(block.text).toContain('https://seaweed.nomad.opsc.io')
+    expect(block.text).toContain('https://dsh.nomad.opsc.io/plugins/cognee-memory/memory/mem-9')
+    expect(block.text.split('\n')).toHaveLength(2)
+  })
 })

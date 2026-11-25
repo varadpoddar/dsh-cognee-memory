@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.9 — 2026-11-25
+
+Fix the queue-row loss that dropped ~700 computed summaries on the varad
+instance, and make recalled summary lines usable in the prompt.
+
+- **Queue rewrites no longer delete concurrent appends.** `pruneDone()` and
+  `compact()` rewrote the whole JSONL log from the in-memory snapshot the drain
+  took at `open()`. The summary backfill is a separate process; every row it
+  appended after that snapshot was deleted by the next prune — silently, with no
+  tombstone and no error (1 067 summaries computed, 366 survived to Cognee).
+  Both rewrites now hold the writer lock and fold the on-disk log first,
+  carrying over rows this process has not seen (newest `updatedAt` wins).
+  `compact()` also takes the lock now; it was unlocked, so a prune/compact
+  could rename the file while another writer appended to the old inode.
+- **Every mutation appends under the lock.** `claim`, `markDone`, `markFailed`
+  and `releaseStale` wrote without it, which left the same rename window open
+  even when prune itself was correct. Appends are re-entrant inside a locked
+  section, so a prune of N rows is still one lock acquisition.
+- **Tombstones merge across writers.** A prune keeps tombstone entries written
+  by another process since this one opened, so a replay stays a no-op.
+- **Summary pointer header is stripped from the model-facing label.** Recalled
+  summary documents start with `[[dsh-memory-pointer {…}]]`; the label used to
+  spend its whole 160-character budget on that JSON, so injected lines showed
+  provenance instead of the fact. The header is now removed before labelling and
+  the label cap is 240 characters, so a line carries content plus scope, date
+  and the per-memory panel URL.
+- **`buildMemoryContextBlock` passes `settings.publicBaseUrl`.** It dropped the
+  configured origin, so its lines had no link even when the coordinator's did.
+- **`scripts/reconcile-summaries.mjs`**: deterministic recovery. It rebuilds
+  segments from the transcript store in backfill order, skips every
+  `content_hash` present in the recovered manifest (extracted from Cognee's own
+  summary pointers), and re-summarises + enqueues only the rest.
+
 ## 1.0.8 — 2026-11-25
 
 Batched ingest: the drain now `add`s a batch of summaries and runs ONE

@@ -248,6 +248,8 @@ export class IngestQueue {
   private readonly byHash: Map<string, string>
   private readonly completedHashes: Map<string, number>
   private lines: number
+  /** True while this instance holds the cross-process writer lock. */
+  private locked = false
 
   private constructor(options: QueueOptions, folded: Folded) {
     this.filePath = options.filePath
@@ -304,6 +306,9 @@ export class IngestQueue {
    * prunes; a lock is what keeps a prune from discarding a concurrent append.
    */
   private withLock<T>(fn: () => T): T {
+    // Re-entrant for one instance: a prune/compact calls append() while it
+    // already holds the file lock, and taking it twice would deadlock.
+    if (this.locked) return fn()
     const lockPath = `${this.filePath}.lock`
     const deadline = Date.now() + 5_000
     for (;;) {
@@ -324,9 +329,11 @@ export class IngestQueue {
         sleepSync(25)
       }
     }
+    this.locked = true
     try {
       return fn()
     } finally {
+      this.locked = false
       try {
         unlinkSync(lockPath)
       } catch {
@@ -335,7 +342,21 @@ export class IngestQueue {
     }
   }
 
+  /**
+   * Append one line under the writer lock. The lock matters even though each
+   * write is a single O_APPEND: a concurrent prune/compact renames a fresh file
+   * over the log, and an append that opened the old inode around that rename
+   * would land in an unlinked file and vanish.
+   */
   private append(item: QueueItem): void {
+    if (this.locked) {
+      this.appendNow(item)
+      return
+    }
+    this.withLock(() => this.appendNow(item))
+  }
+
+  private appendNow(item: QueueItem): void {
     const line = `${JSON.stringify(item)}\n`
     if (this.syncWrites) {
       const fd = openSync(this.filePath, 'a', 0o600)
@@ -432,17 +453,19 @@ export class IngestQueue {
     }
     due.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     const claimed: QueueItem[] = []
-    for (const item of due) {
-      const updated: QueueItem = {
-        ...item,
-        state: 'inflight',
-        attempts: item.attempts + 1,
-        updatedAt: new Date(now).toISOString(),
-        endpoint: workerId,
+    this.withLock(() => {
+      for (const item of due) {
+        const updated: QueueItem = {
+          ...item,
+          state: 'inflight',
+          attempts: item.attempts + 1,
+          updatedAt: new Date(now).toISOString(),
+          endpoint: workerId,
+        }
+        this.append(updated)
+        claimed.push(updated)
       }
-      this.append(updated)
-      claimed.push(updated)
-    }
+    })
     return claimed
   }
 
@@ -480,15 +503,40 @@ export class IngestQueue {
   }
 
   /**
+   * Fold the on-disk log into this instance before a rewrite. The drainer and
+   * the journal are separate processes: rows appended by the other one after
+   * this process opened are invisible here, and pruning from a stale snapshot
+   * deleted them (the 1.0.8 varad summary loss). Newest `updatedAt` wins for
+   * rows both sides know about.
+   */
+  private absorbDisk(): void {
+    const folded = fold(this.filePath)
+    for (const item of folded.items.values()) {
+      const mine = this.items.get(item.id)
+      if (mine === undefined || item.updatedAt > mine.updatedAt) {
+        this.items.set(item.id, item)
+        this.byHash.set(item.contentHash, item.id)
+      }
+    }
+    this.lines = Math.max(this.lines, folded.lines)
+  }
+
+  /**
    * Remove fully-ingested tasks from the log and remember their hashes so a
    * replay stays idempotent. This is the "removed only once completely
    * ingested" half of the task lifecycle: pending, inflight and failed rows
    * survive, `done` rows do not.
+   *
+   * The rewrite re-reads the log under the writer lock and carries over every
+   * row this process has not seen, so a concurrent append is never dropped.
    */
   pruneDone(): { readonly removed: number; readonly remaining: number } {
-    const done = [...this.items.values()].filter((item) => item.state === 'done')
-    if (done.length === 0) return { removed: 0, remaining: this.items.size }
-    this.withLock(() => {
+    const hasDone = [...this.items.values()].some((item) => item.state === 'done')
+    if (!hasDone) return { removed: 0, remaining: this.items.size }
+    return this.withLock(() => {
+      this.absorbDisk()
+      const done = [...this.items.values()].filter((item) => item.state === 'done')
+      if (done.length === 0) return { removed: 0, remaining: this.items.size }
       const stamp = this.now()
       for (const item of done) {
         this.completedHashes.set(item.contentHash, stamp)
@@ -500,6 +548,11 @@ export class IngestQueue {
       writeFileSync(temporary, body === '' ? '' : `${body}\n`, { encoding: 'utf8', mode: 0o600 })
       renameSync(temporary, this.filePath)
       this.lines = this.items.size
+      // Another process may have tombstoned rows since this one opened; keep
+      // its entries so a replay stays idempotent across writers.
+      for (const [hash, at] of this.tombstones()) {
+        if (!this.completedHashes.has(hash)) this.completedHashes.set(hash, at)
+      }
       const cutoff = stamp - this.tombstoneRetentionMs
       const kept = [...this.completedHashes.entries()].filter((entry) => entry[1] >= cutoff)
       this.completedHashes.clear()
@@ -509,8 +562,8 @@ export class IngestQueue {
         kept.map(([hash, at]) => JSON.stringify({ hash, at })).join('\n') + (kept.length === 0 ? '' : '\n'),
         { encoding: 'utf8', mode: 0o600 },
       )
+      return { removed: done.length, remaining: this.items.size }
     })
-    return { removed: done.length, remaining: this.items.size }
   }
 
   private transition(id: string, update: (item: QueueItem) => QueueItem): void {
@@ -552,18 +605,21 @@ export class IngestQueue {
 
   /**
    * Rewrite the log with one line per live item once it is mostly history.
-   * Atomic: temp file plus rename, so an interrupted compaction keeps the
-   * original log intact and loses nothing.
+   * Atomic *and* lossless: it holds the writer lock and folds the on-disk log
+   * first, so rows another process appended since this one opened survive.
    */
   compact(): { readonly before: number; readonly after: number } {
-    const before = this.lines
-    const body = [...this.items.values()].map((item) => JSON.stringify(item)).join('\n')
-    const temporary = `${this.filePath}.tmp-${process.pid}`
-    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 })
-    writeFileSync(temporary, body === '' ? '' : `${body}\n`, { encoding: 'utf8', mode: 0o600 })
-    renameSync(temporary, this.filePath)
-    this.lines = this.items.size
-    return { before, after: this.items.size }
+    return this.withLock(() => {
+      const before = this.lines
+      this.absorbDisk()
+      const body = [...this.items.values()].map((item) => JSON.stringify(item)).join('\n')
+      const temporary = `${this.filePath}.tmp-${process.pid}`
+      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 })
+      writeFileSync(temporary, body === '' ? '' : `${body}\n`, { encoding: 'utf8', mode: 0o600 })
+      renameSync(temporary, this.filePath)
+      this.lines = this.items.size
+      return { before, after: this.items.size }
+    })
   }
 
   private maybeCompact(): void {

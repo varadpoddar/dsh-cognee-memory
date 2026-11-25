@@ -10,6 +10,7 @@ import {
   IngestQueue,
   backoffDelayMs,
   contentHashOf,
+  readQueueSnapshot,
   resolveQueuePath,
   type QueueItem,
 } from '../src/queue/store.js'
@@ -127,6 +128,42 @@ describe('queue store', () => {
     expect(reopened.status().counts.done).toBe(1)
     // A compacted log is one line per item, so it reloads without replaying history.
     expect(readFileSync(filePath, 'utf8').trim().split('\n')).toHaveLength(300)
+  })
+
+  it('does not drop rows a second writer appended after this one opened', () => {
+    const { filePath } = freshQueue()
+    const pruner = IngestQueue.open({ filePath })
+    pruner.enqueue([{ text: 'done item', scope: scopeKeyValue, scopeRef }])
+    const [claimed] = pruner.claim({ limit: 1, workerId: 'drain' })
+    pruner.markDone(claimed!.id)
+
+    // A second process (the summary backfill) opens after the pruner and
+    // appends while the pruner still holds its pre-append snapshot.
+    const writer = IngestQueue.open({ filePath })
+    writer.enqueue(
+      Array.from({ length: 5 }, (_, index) => ({ text: `summary ${index}`, scope: scopeKeyValue, scopeRef })),
+    )
+
+    expect(pruner.pruneDone().removed).toBe(1)
+    const after = readQueueSnapshot(filePath)
+    expect(after.items.map((item) => item.text).sort()).toEqual(
+      Array.from({ length: 5 }, (_, index) => `summary ${index}`).sort(),
+    )
+    // The tombstone is durable, so a replay of the pruned item stays a no-op.
+    const replay = IngestQueue.open({ filePath })
+    expect(replay.enqueue([{ text: 'done item', scope: scopeKeyValue, scopeRef }]).duplicates).toBe(1)
+  })
+
+  it('compaction merges concurrent appends instead of rewriting them away', () => {
+    const { filePath } = freshQueue()
+    const compactor = IngestQueue.open({ filePath })
+    compactor.enqueue([{ text: 'early', scope: scopeKeyValue, scopeRef }])
+    const writer = IngestQueue.open({ filePath })
+    writer.enqueue([{ text: 'late', scope: scopeKeyValue, scopeRef }])
+
+    compactor.compact()
+    const after = readQueueSnapshot(filePath)
+    expect(after.items.map((item) => item.text).sort()).toEqual(['early', 'late'])
   })
 })
 

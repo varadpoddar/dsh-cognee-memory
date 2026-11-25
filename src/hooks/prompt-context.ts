@@ -83,7 +83,12 @@ export function buildMemoryContextBlock(
 ): string {
   const maxTokens = budget?.maxTokens ?? config.prompt.maxTokens
   const maxItems = budget?.maxItems ?? config.prompt.maxItems
-  return formatMemoryBlock(hits, { maxTokens, maxItems }).text
+  const publicBaseUrl = config.settings.publicBaseUrl
+  return formatMemoryBlock(hits, {
+    maxTokens,
+    maxItems,
+    ...(publicBaseUrl === undefined ? {} : { publicBaseUrl }),
+  }).text
 }
 
 /** Tool-facing projection of recalled memories; still untrusted, still bounded. */

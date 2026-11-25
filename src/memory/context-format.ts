@@ -23,7 +23,15 @@ import type { JsonValue, RecallHit } from '../types.js'
 const MAX_ITEM_CHARS = 1_200
 const MAX_QUERY_CHARS = 2_000
 /** One model-visible line stays readable; longer memory is truncated with `…`. */
-const MAX_LABEL_CHARS = 160
+const MAX_LABEL_CHARS = 240
+
+/**
+ * A summary document begins with a machine-readable pointer header
+ * (`[[dsh-memory-pointer {…}]]`). It is provenance for the panel, not content
+ * for the model: leaving it in the label spent most of the 160–240-character
+ * budget on JSON and pushed the actual fact (an IP, an endpoint) out of view.
+ */
+const POINTER_HEADER = /^\s*\[\[dsh-memory-pointer\s+\{[\s\S]*?\}\]\]\s*/
 
 /** Header line every injected block starts with; no warning language. */
 export const MEMORY_BLOCK_HEADER = 'Known context:'
@@ -144,7 +152,7 @@ export function memoryLabel(hit: RecallHit): string {
   const source =
     metadataString(hit.record, 'label') ??
     metadataString(hit.record, 'semanticKey') ??
-    hit.record.text
+    hit.record.text.replace(POINTER_HEADER, '')
   const text = sanitizeMemoryText(source).replace(/\s*\n+\s*/g, ' ').trim()
   if (text.length <= MAX_LABEL_CHARS) return text
   return `${text.slice(0, MAX_LABEL_CHARS - 1).trimEnd()}…`
