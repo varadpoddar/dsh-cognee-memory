@@ -132,7 +132,7 @@ the rollback point for the storage reset:
 /root/backups/cognee-pre-s3-reset-20261125T101246Z/
   cognee_db-all.sql.gz   126,448,184 B  8b622acce9a6aac89b8d5d2033a1e5dc0f4119225b89fd58e6023263a233c50e
   cognee-data.tar.gz     138,596,093 B  c37cfbff6a7ed2b89eb008f00ab092888eddfee0753563a56ad26f49bc915629
-  cognee.env (0600), compose.yaml, SHA256SUMS
+  cognee.env, compose.yaml, SHA256SUMS   (directory 0700; files 0600)
 ```
 
 The dump contains 26 `CREATE DATABASE` statements; the data tar has 10,201
