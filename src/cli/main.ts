@@ -21,6 +21,7 @@ import {
 } from './history-import.js'
 import { allowedScopes, createCliRuntime, describeScope, identityForScope, parseScopeArg } from './runtime.js'
 import { runQueue } from './queue-cmd.js'
+import { runBackfill } from './backfill-transcripts.js'
 import { runTranscript } from './transcript-cmd.js'
 import { MemoryError } from '../errors.js'
 
@@ -53,6 +54,7 @@ const VALUE_FLAGS = new Set([
   'queue-sub',
   'transcript-sub',
   'turns',
+  'roles',
 ])
 const BOOLEAN_FLAGS = new Set(['apply', 'dry-run', 'json', 'help', 'from-sessions', 'drain', 'status'])
 
@@ -60,6 +62,14 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   const command = argv[0] ?? 'help'
   const values: Record<string, string> = {}
   const flags = new Set<string>()
+  // `--from-sessions` is a boolean for `queue enqueue` but takes the sessions
+  // directory for `backfill-transcripts`, so the flag kind follows the command.
+  const valueFlags = new Set(VALUE_FLAGS)
+  const booleanFlags = new Set(BOOLEAN_FLAGS)
+  if (command === 'backfill-transcripts') {
+    booleanFlags.delete('from-sessions')
+    valueFlags.add('from-sessions')
+  }
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index] ?? ''
     if (!arg.startsWith('--')) {
@@ -75,11 +85,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       throw new MemoryError('VALIDATION', `unexpected argument: ${arg}`)
     }
     const key = arg.slice(2)
-    if (BOOLEAN_FLAGS.has(key)) {
+    if (booleanFlags.has(key)) {
       flags.add(key)
       continue
     }
-    if (!VALUE_FLAGS.has(key)) throw new MemoryError('VALIDATION', `unknown flag: --${key}`)
+    if (!valueFlags.has(key)) throw new MemoryError('VALIDATION', `unknown flag: --${key}`)
     const value = argv[index + 1]
     if (value === undefined || value.startsWith('--')) {
       throw new MemoryError('VALIDATION', `--${key} requires a value`)
@@ -108,6 +118,7 @@ const HELP = [
   '  remember         write one explicit fact (operator seeding / round-trip proofs)',
   '  queue            durable ingest queue: enqueue | drain | status',
   '  transcript       lossless transcript store: show',
+  '  backfill-transcripts  fill transcript store + segments + summary tasks from DSH sessions',
   '',
   'flags: --scope <name:rawId> --apply --dry-run --json --principal <id>',
   '       import-history: --sessions-dir <dir> --state-file <path> --session <id> --limit-sessions N',
@@ -118,6 +129,7 @@ const HELP = [
   '       recall: --query <text> --limit N',
   '       remember: --text <fact>',
   '       transcript show: --session <id> --turns a..b',
+  '       backfill-transcripts: --from-sessions <dir> --roles both|user --limit N [--dry-run|--apply]',
 ].join('\n')
 
 async function runImportHistory(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
@@ -329,6 +341,55 @@ async function runRemember(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo):
   return 0
 }
 
+function defaultSessionsDir(env: NodeJS.ProcessEnv): string {
+  const home = env.DSH_HOME?.trim() || `${env.HOME ?? ''}/.dsh`
+  return `${home}/sessions`
+}
+
+async function runBackfillCommand(args: ParsedArgs, env: NodeJS.ProcessEnv, io: CliIo): Promise<number> {
+  const runtime = createCliRuntime(env)
+  const scope = parseScopeArg(args.values.scope, runtime.config, env)
+  const sessionsDir = args.values['from-sessions']?.trim() || defaultSessionsDir(env)
+  const rolesArg = args.values.roles?.trim() ?? 'both'
+  if (rolesArg !== 'both' && rolesArg !== 'user') {
+    throw new MemoryError('VALIDATION', `--roles must be "both" or "user": ${rolesArg}`)
+  }
+  const limit = args.values.limit === undefined ? undefined : integer(args.values.limit, 0)
+  const apply = args.flags.has('apply') && !args.flags.has('dry-run')
+  const report = await runBackfill({
+    sessionsDir,
+    apply,
+    roles: rolesArg,
+    ...(limit === undefined || limit === 0 ? {} : { limitSessions: limit }),
+    config: runtime.config,
+    env,
+    scope,
+    ...(args.values.session === undefined ? {} : { onlySessionId: args.values.session }),
+  })
+  if (args.flags.has('json')) {
+    io.out(JSON.stringify(report))
+    return report.failures > 0 ? 1 : 0
+  }
+  io.out(
+    `backfill${report.dryRun ? ' (dry run)' : ''}: sessions ${report.sessions}  skipped ${report.skippedSessions}  messages ${report.messages}  turns ${report.turns}  segments ${report.segments}`,
+  )
+  io.out(
+    `rows: new ${report.newRows}  duplicate ${report.duplicateRows}  conflicts ${report.conflicts}`,
+  )
+  if (report.dryRun) {
+    const minutes = Math.ceil(report.estimatedMs / 60_000)
+    io.out(
+      `summaries: would enqueue ${report.segments}  (est. ${Math.ceil(report.estimatedInputTokens / 1000)}k in + ${Math.ceil(report.estimatedOutputTokens / 1000)}k out tokens, ${report.estimatedRequests} requests, ~${minutes}m)`,
+    )
+    io.out('dry run — pass --apply to write rows and enqueue summary tasks')
+  } else {
+    io.out(
+      `summaries: enqueued ${report.enqueued}  duplicates ${report.duplicateSummaries}  failed ${report.failures}`,
+    )
+  }
+  return report.failures > 0 ? 1 : 0
+}
+
 /** Run the CLI (`argv` is `[command, ...flags]`) and return its exit code. */
 export async function runCli(
   argv: readonly string[],
@@ -356,6 +417,8 @@ export async function runCli(
         return await runQueue(args, env, io)
       case 'transcript':
         return await runTranscript(args, env, io)
+      case 'backfill-transcripts':
+        return await runBackfillCommand(args, env, io)
       default:
         io.err(`unknown command: ${args.command}`)
         io.out(HELP)

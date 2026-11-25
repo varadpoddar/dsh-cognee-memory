@@ -41,6 +41,15 @@ export const QUEUE_PATH_ENV = 'COGNEE_MEMORY_QUEUE_FILE'
 
 export type QueueState = 'pending' | 'inflight' | 'done' | 'failed'
 
+/**
+ * What kind of task this is. `turn` (the default when absent on older rows) is
+ * one part of a conversation; `summary` is one rendered segment-summary
+ * document, which the drain writes like prose but with its own provenance. The
+ * kind never changes the lifecycle: leases, tombstones, retries and dedupe are
+ * shared.
+ */
+export type QueueKind = 'turn' | 'summary'
+
 /** Where a queued chunk came from. Kept for provenance, never used for routing. */
 export interface QueueSource {
   readonly sessionId?: string
@@ -60,6 +69,8 @@ export interface QueueItem {
   readonly scope: string
   readonly text: string
   readonly source: QueueSource
+  /** `summary` for a rendered segment summary; absent means `turn`. */
+  readonly kind?: QueueKind
   readonly state: QueueState
   readonly attempts: number
   /** Epoch ms before which a `failed` item must not be retried. */
@@ -195,6 +206,8 @@ export interface EnqueueEntry {
   readonly scope: string
   readonly source?: QueueSource
   readonly scopeRef?: { readonly scope: MemoryScope; readonly id: string }
+  /** Task kind; defaults to `turn` when omitted. */
+  readonly kind?: QueueKind
   /**
    * Identity seed mixed into the content hash. The turn journal uses
    * `session:turn:seq:role:part` so two identical messages ("continue") stay
@@ -375,6 +388,7 @@ export class IngestQueue {
         scope: entry.scope,
         text,
         source: entry.source ?? {},
+        ...(entry.kind === undefined ? {} : { kind: entry.kind }),
         ...(entry.scopeRef === undefined ? {} : { scopeRef: entry.scopeRef }),
         state: 'pending',
         attempts: 0,

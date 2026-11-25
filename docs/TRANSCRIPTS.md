@@ -161,5 +161,29 @@ proportional to history, unlike the queue (proportional to backlog).
   that row rather than being separately addressable.
 - Out-of-order appends are refused (`VALIDATION`) instead of rewriting earlier
   offsets; a replay of the same turn is idempotent.
-- Summarization (5d) and backfill (5f) are not part of 1.0.6. Nothing here calls
-  an LLM or Cognee, and no summary is written yet.
+- This module itself never calls an LLM or Cognee. Summarization and backfill
+  (1.0.6 slices 5d/5f) live beside it: `memory backfill-transcripts` fills this
+  store, segments each session and enqueues `kind:"summary"` tasks, and the
+  nightly drain ingests them (docs/SUMMARY_PIPELINE.md).
+
+## Backfill and summary pointers
+
+`memory backfill-transcripts --from-sessions <dir> [--dry-run|--apply]` reads
+DSH session logs at full fidelity (both roles, no 2 000-char cap), appends the
+missing rows here, rebuilds the turn-boundary segments for the whole session,
+and — with `--apply` — summarizes each segment and enqueues one
+`kind:"summary"` task per segment. Rows dedupe on `(turn, role, content_hash)`,
+so a second run adds no rows; summary tasks dedupe on
+`content_hash + prompt_version + model`.
+
+A summary document starts with a header that extends the pointer above:
+
+```
+[[dsh-memory-pointer {"session_id":"…","turn_start":12,"turn_end":13,
+ "segment_index":6,"content_hash":"<sha256>","char_start":8123,
+ "char_end":11044,"model":"unsloth/Qwen3.8-27B-GGUF","prompt_version":"1"}]]
+```
+
+`parseSummaryDocument` returns the pointer and prose, so a retrieved summary
+resolves through `readRange` exactly like a record pointer. Full contract:
+docs/SUMMARY_PIPELINE.md.

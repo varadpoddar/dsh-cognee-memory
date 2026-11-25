@@ -170,6 +170,18 @@ resumable through a state file keyed by the extraction idempotency key and the
 source ref (session id + message index); candidates are applied in timestamp
 order so a later correction supersedes the earlier fact.
 
+`backfill-transcripts` fills the lossless transcript store and enqueues segment
+summaries from DSH session logs (both roles, no 2 000-char cap):
+
+```bash
+memory backfill-transcripts --from-sessions "$DSH_HOME/sessions" [--dry-run] [--apply] [--roles both|user] [--limit N]
+```
+
+Dry run reports sessions/messages/turns/segments and estimated tokens/time and
+writes nothing; `--apply` writes rows, segments each session and enqueues one
+`kind:"summary"` task per segment. Re-running is idempotent. See
+[`docs/SUMMARY_PIPELINE.md`](docs/SUMMARY_PIPELINE.md).
+
 Bundles move records between instances or applications:
 
 ```bash
@@ -291,6 +303,8 @@ npm run test:live    # real backend, skipped without COGNEE_API_KEY
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | design, verified host contract, limitations |
 | [`docs/SETTINGS.md`](docs/SETTINGS.md) | settings precedence and routes |
 | [`docs/LIVE_INTEGRATION.md`](docs/LIVE_INTEGRATION.md) | live probes and observed Cognee shapes |
+| [`docs/TRANSCRIPTS.md`](docs/TRANSCRIPTS.md) | lossless transcript store, pointers, panel Source |
+| [`docs/SUMMARY_PIPELINE.md`](docs/SUMMARY_PIPELINE.md) | segment summaries: pinned Qwen prompt, pointer header, backfill, cost/failure modes |
 | [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) | measured unit + live numbers |
 | [`CHANGELOG.md`](CHANGELOG.md) | milestones and release history |
 | [`ROLLBACK.md`](ROLLBACK.md) | rollback runbook |

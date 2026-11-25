@@ -159,9 +159,9 @@ function buildTargets(config: CogneeMemoryConfig, env: NodeJS.ProcessEnv): Drain
           identity,
           provenance: {
             kind: 'import',
-            source: 'ingest-queue',
+            source: item.kind === 'summary' ? 'segment-summary' : 'ingest-queue',
             recordedAt: new Date().toISOString(),
-            evidence: 'queue:nightly',
+            evidence: item.kind === 'summary' ? 'queue:summary' : 'queue:nightly',
             ...(item.source.sessionId === undefined ? {} : { sessionId: item.source.sessionId }),
             ...(item.source.turnIndex === undefined ? {} : { turn: item.source.turnIndex }),
           },

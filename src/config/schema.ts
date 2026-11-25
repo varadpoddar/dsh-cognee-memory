@@ -134,6 +134,33 @@ export const CogneeMemoryConfigSchema = z
             scope: z.enum(['agent', 'user', 'project', 'team']).optional(),
           })
           .prefault({}),
+        /**
+         * Per-segment summarization (1.0.6 slice 5d/5f). Off by default: a
+         * deployment opts in, and it stays off at runtime unless the endpoint
+         * environment named by `baseUrlEnv` (or the extraction endpoint) and the
+         * API key environment are present. The model is pinned in code
+         * (`SUMMARY_MODEL`); `model` may only override it deliberately, because
+         * a summary records the model and prompt version that produced it.
+         */
+        summaries: z
+          .object({
+            enabled: z.boolean().default(false),
+            model: nonEmpty.default('unsloth/Qwen3.8-27B-GGUF'),
+            /** Env var naming the OpenAI-compatible base URL; unset -> extraction.llm.endpoint. */
+            baseUrlEnv: nonEmpty.default('COGNEE_SUMMARY_BASE_URL'),
+            /** Env var holding the local Studio key; never the key itself. */
+            apiKeyEnv: nonEmpty.default('UNSLOTH_LARGE_API_KEY'),
+            /** Hard cap on generated summary tokens (also the merge step). */
+            maxOutputTokens: z.number().int().min(32).max(4_096).default(700),
+            /** Off by default. Positive only splits BETWEEN whole turns. */
+            maxCharsPerSegment: z.number().int().min(500).max(500_000).optional(),
+            /** Segments summarized concurrently during a backfill. */
+            concurrency: z.number().int().min(1).max(8).default(2),
+            /** Max chars of segment text sent per summarizer request (map step). */
+            maxInputChars: z.number().int().min(1_000).max(200_000).default(24_000),
+            timeoutMs: z.number().int().min(500).max(300_000).default(120_000),
+          })
+          .prefault({}),
         /** Ingest-queue lifecycle shared by the journal and the nightly drain. */
         queue: z
           .object({

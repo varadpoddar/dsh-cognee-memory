@@ -202,3 +202,227 @@ export function discoverTranscripts(sessionsDir: string): string[] {
   walk(sessionsDir, 0)
   return found.sort()
 }
+
+// ---------------------------------------------------------------------------
+// Full-fidelity reading (1.0.6 slice 5f backfill)
+//
+// `parseTranscript` above is the import-history reader: human turns only, with
+// the historical 2 000-char drop. The backfill must write the *whole*
+// conversation into the lossless store — both roles, no truncation — so it uses
+// the reader below. The default options of `parseTranscript` are unchanged.
+// ---------------------------------------------------------------------------
+
+/** Both conversation roles, in the order DSH committed them. */
+export type TranscriptFullRole = 'user' | 'assistant'
+
+/** One committed message of either role, verbatim. */
+export interface TranscriptFullMessage {
+  readonly sessionId: string
+  /** Durable message index inside the transcript (the event `seq`). */
+  readonly messageIndex: number
+  readonly role: TranscriptFullRole
+  /** 1-based turn number (DSH `turn/start` carries it; old logs are numbered per user message). */
+  readonly turn: number
+  readonly text: string
+  readonly timestamp: string
+}
+
+/** Why a message was not part of the full transcript; counted, never logged with text. */
+export interface TranscriptFullSkips {
+  synthetic: number
+  tooLong: number
+  notHuman: number
+  malformed: number
+  /** Assistant messages whose only blocks were reasoning and/or tool calls. */
+  reasoning: number
+}
+
+/** One parsed session transcript at full fidelity. */
+export interface FullTranscript {
+  readonly filePath: string
+  readonly sessionId: string
+  readonly createdAt?: string
+  readonly messages: readonly TranscriptFullMessage[]
+  readonly skips: TranscriptFullSkips
+  readonly frames: number
+  readonly torn: boolean
+}
+
+export interface TranscriptFullOptions {
+  /** Include assistant text messages. Default true for the full reader. */
+  readonly includeAssistant?: boolean
+  /** `0`/absent = no cap (default); positive applies the import-history skip rule. */
+  readonly maxMessageChars?: number
+}
+
+function payloadTurnOf(event: Record<string, unknown>, data: Record<string, unknown> | undefined): number | undefined {
+  if (typeof event.turn === 'number' && Number.isInteger(event.turn)) return event.turn
+  if (data !== undefined && typeof data.turn === 'number' && Number.isInteger(data.turn)) return data.turn
+  return undefined
+}
+
+function contentBlocks(event: Record<string, unknown>, data: Record<string, unknown> | undefined): unknown {
+  const message = event.message
+  if (isRecord(message) && Array.isArray(message.content)) return message.content
+  if (data !== undefined) {
+    const nested = data.message
+    if (isRecord(nested) && Array.isArray(nested.content)) return nested.content
+    if (Array.isArray(data.content)) return data.content
+  }
+  return event.content
+}
+
+/** Text blocks joined with `\n\n`; reasoning and tool-call blocks are never text. */
+function fullTextOf(content: unknown): { readonly text: string; readonly blocks: number } {
+  if (!Array.isArray(content)) return { text: '', blocks: 0 }
+  const parts: string[] = []
+  let blocks = 0
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    blocks += 1
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return { text: parts.join('\n\n').trim(), blocks }
+}
+
+/**
+ * Parse one decompressed transcript body into ordered user and assistant
+ * messages, with no character cap unless `maxMessageChars` asks for one.
+ *
+ * Turn tracking: `turn/start` (and any envelope with `data.turn`) sets the
+ * current 1-based turn, so a backfilled row carries the same coordinates the
+ * live hook writes. A log with no turn events increments on each human user
+ * message, which is the only boundary an old transcript preserves.
+ */
+export function parseTranscriptFull(
+  filePath: string,
+  body: string,
+  fallbackSessionId: string,
+  options: TranscriptFullOptions = {},
+): FullTranscript {
+  const includeAssistant = options.includeAssistant ?? true
+  const maxChars = options.maxMessageChars ?? 0
+  const skips: TranscriptFullSkips = { synthetic: 0, tooLong: 0, notHuman: 0, malformed: 0, reasoning: 0 }
+  const messages: TranscriptFullMessage[] = []
+  let sessionId = fallbackSessionId
+  let createdAt: string | undefined
+  let currentTurn = 0
+  let turnEvents = 0
+  let runningIndex = 0
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let event: unknown
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      skips.malformed += 1
+      continue
+    }
+    if (!isRecord(event)) {
+      skips.malformed += 1
+      continue
+    }
+    const type = event.type
+    const data = isRecord(event.data) ? event.data : undefined
+    if (type === 'session') {
+      if (typeof event.id === 'string' && event.id !== '') sessionId = event.id
+      if (typeof event.createdAt === 'number') createdAt = new Date(event.createdAt).toISOString()
+      continue
+    }
+    const payloadTurn = payloadTurnOf(event, data)
+    if (type === 'turn/start') {
+      turnEvents += 1
+      currentTurn = payloadTurn ?? currentTurn + 1
+      continue
+    }
+    if (payloadTurn !== undefined) currentTurn = payloadTurn
+    runningIndex += 1
+    const messageIndex =
+      typeof event.seq === 'number' && Number.isInteger(event.seq) ? event.seq : runningIndex
+    const time = typeof event.time === 'number' ? event.time : undefined
+    const timestamp = new Date(
+      time ?? Date.parse(createdAt ?? '1970-01-01T00:00:00Z'),
+    ).toISOString()
+
+    if (type === 'user/message') {
+      const source = data !== undefined && isRecord(data.source) ? data.source : undefined
+      const form = source?.form
+      // Same human filter as the import-history reader, but old logs that omit
+      // `source` are still conversation and must not be lost.
+      if (source !== undefined && (source.kind !== 'user' || (form !== undefined && form !== 'notice'))) {
+        skips.notHuman += 1
+        continue
+      }
+      const { text } = fullTextOf(contentBlocks(event, data))
+      if (text === '') {
+        skips.notHuman += 1
+        continue
+      }
+      if (SYNTHETIC_PREFIXES.some((prefix) => text.startsWith(prefix))) {
+        skips.synthetic += 1
+        continue
+      }
+      if (maxChars > 0 && text.length > maxChars) {
+        skips.tooLong += 1
+        continue
+      }
+      // A log without the newer turn events gets one turn per human message.
+      if (turnEvents === 0) currentTurn += 1
+      messages.push({
+        sessionId,
+        messageIndex,
+        role: 'user',
+        turn: currentTurn === 0 ? 1 : currentTurn,
+        text,
+        timestamp,
+      })
+      continue
+    }
+
+    if (type === 'assistant/message') {
+      if (!includeAssistant) continue
+      const { text, blocks } = fullTextOf(contentBlocks(event, data))
+      if (text === '') {
+        if (blocks > 0) skips.reasoning += 1
+        else skips.notHuman += 1
+        continue
+      }
+      if (maxChars > 0 && text.length > maxChars) {
+        skips.tooLong += 1
+        continue
+      }
+      messages.push({
+        sessionId,
+        messageIndex,
+        role: 'assistant',
+        turn: currentTurn === 0 ? 1 : currentTurn,
+        text,
+        timestamp,
+      })
+      continue
+    }
+  }
+  return {
+    filePath,
+    sessionId,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    messages,
+    skips,
+    frames: 0,
+    torn: false,
+  }
+}
+
+/** Read one transcript file at full fidelity, decompressing it when needed. */
+export function readTranscriptFull(filePath: string, options: TranscriptFullOptions = {}): FullTranscript {
+  const bytes = readFileSync(filePath)
+  const fallbackSessionId = filePath.split('/').at(-2) ?? filePath
+  if (filePath.endsWith('.zstd')) {
+    const decoded = decodeZstdStream(bytes)
+    const parsed = parseTranscriptFull(filePath, decoded.text, fallbackSessionId, options)
+    return { ...parsed, frames: decoded.frames, torn: decoded.torn }
+  }
+  const body = bytes.toString('utf8')
+  return parseTranscriptFull(filePath, body, fallbackSessionId, options)
+}

@@ -51,6 +51,19 @@ Long messages are split at `chunkChars` (default 8 000) on line/space
 boundaries. Nothing is truncated or dropped; each part is an independent task
 with `source.partIndex`/`partOf`.
 
+### Task kinds
+
+| `kind` | Producer | Payload |
+| - | - | - |
+| `turn` (default; absent on older rows) | turn journal | one message part |
+| `summary` | `memory backfill-transcripts --apply` | one summary document: `[[dsh-memory-pointer …]]` header + prose |
+
+Kind never changes the lifecycle (lease, retries, tombstones, prune) — it only
+changes the drain's provenance (`source: "segment-summary"`,
+`evidence: "queue:summary"`) and marks the task in the settings list. A summary
+task dedupes on `content_hash + prompt_version + model`, so a prompt bump is new
+work rather than a duplicate. See docs/SUMMARY_PIPELINE.md.
+
 ## Durability
 
 - every append is `write(2)` + `fdatasync` (`ingestion.queue.syncWrites`), so an
@@ -72,12 +85,21 @@ the evidence copy, 0600 on the local disk. A pointer
 `{session_id, turn_start, turn_end, segment_index, content_hash, char_start,
 char_end}` names a range, and the detail page resolves it to the exact text (or
 an honest "transcript unavailable" note). Summarization and backfill of that
-store arrive in later slices.
+store are 1.0.6 slices 5d/5f: the backfill fills rows + segments, then enqueues
+`kind:"summary"` tasks (docs/SUMMARY_PIPELINE.md).
 
 ## Configuration
 
 ```yaml
 ingestion:
+  summaries:
+    enabled: false       # backfill summaries; varad profile sets true
+    model: unsloth/Qwen3.8-27B-GGUF
+    baseUrlEnv: COGNEE_SUMMARY_BASE_URL
+    apiKeyEnv: UNSLOTH_LARGE_API_KEY
+    maxOutputTokens: 700
+    maxCharsPerSegment: null   # off
+    concurrency: 2
   journal:
     enabled: false        # opt-in; off preserves prior behaviour
     includeAssistant: true

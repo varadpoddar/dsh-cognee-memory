@@ -103,3 +103,33 @@ Evidence: `/home/varad/first-turn.jsonl` on CT 103 (and
   ingested both (`ok 2`, 11.2 s) and pruned them; the queue then held only one
   permanent failure (`403` URL-leading payload, attempts 6, `permanent: true`).
 
+
+## 1.0.6 summaries (pending: the 02:00 deployment run)
+
+Per-segment summarization is built and locally verified (`docs/SUMMARY_PIPELINE.md`)
+but **not deployed** as of 2026-11-25. The deployment step is the 02:00 run:
+
+1. install 1.0.6 in both profiles (`web`, `headless`);
+2. add to both profile configs:
+
+   ```yaml
+   ingestion:
+     summaries:
+       enabled: true
+   ```
+
+   `enabled: true` only takes effect when the endpoint is loopback/RFC1918 and
+   `UNSLOTH_LARGE_API_KEY` is present (it is, from `/etc/dsh/llm.env`); without
+   that env the plugin stays inert, so the flag is safe in either profile.
+3. dry run first, then apply (the 02:00 job):
+
+   ```bash
+   memory backfill-transcripts --from-sessions /var/lib/deepseek-harness/.dsh/sessions --dry-run
+   memory backfill-transcripts --from-sessions /var/lib/deepseek-harness/.dsh/sessions --apply
+   ```
+
+4. the 04:00 `dsh-cognify-queue.timer` drain then ingests the `kind:"summary"`
+   tasks alongside the turn tasks.
+
+No real backfill was run from the development Mac; local evidence is fixture
+data plus one live Qwen call (`test/live/summarizer-live.test.ts`, pass, 6.25 s).

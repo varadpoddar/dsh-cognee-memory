@@ -2,9 +2,10 @@
 
 ## 1.0.6 — 2026-11-24
 
-First slice of the conversation-summary chain: lossless transcript store,
-turn-boundary segmenter, pointer schema, and pointer-to-range panel resolution.
-Summarization (5d) and backfill (5f) are deliberately not in this release.
+Conversation-summary chain: lossless transcript store, turn-boundary segmenter,
+pointer schema and panel resolution (slice 1), then per-segment summarization
+with the local Qwen, `kind:"summary"` journal tasks and a resumable
+`memory backfill-transcripts` command (slices 5d/5f).
 
 - **Lossless transcript store** (`src/memory/transcript-store.ts`): every
   committed turn — user *and* assistant — is appended verbatim, with no char
@@ -33,8 +34,45 @@ Summarization (5d) and backfill (5f) are deliberately not in this release.
 - **CLI**: `memory transcript show --session <id> [--turns a..b] [--json]` for
   offline manual verification.
 - **Docs**: new `docs/TRANSCRIPTS.md` (layout, addressing, retention, size
-  estimate for 682 sessions). Tests: 47 new (store 12, segmenter 9, pointer 10,
-  routes 13, CLI 3); suite 592 green.
+  estimate for 682 sessions).
+- **Per-segment summarization (5d)** (`src/memory/summarizer.ts`): one pin
+  (`SUMMARY_PROMPT_VERSION = "1"`, `SUMMARY_MODEL =
+  unsloth/Qwen3.8-27B-GGUF`) and a code-pinned prompt contract —
+  services/hosts/IPs/ports/paths, decisions + rationale, order of work, open
+  questions, credential file paths only. Map-reduce over turn groups bounded by
+  `maxInputChars`; hard output cap; every input and output is secret-scanned
+  (`[REDACTED:kind]`); only loopback/RFC1918 endpoints (`assertPrivateEndpoint`),
+  reusing the extraction LLM's raw-`fetch` transport pattern.
+- **Summary document + pointer header (5d)**: `[[dsh-memory-pointer
+  {session_id,turn_start,turn_end,segment_index,content_hash,char_start,
+  char_end,model,prompt_version}]]` followed by the prose
+  (`src/memory/pointer.ts`). Parsing is strict, the hash is recomputed from the
+  segment text, and retrieval resolves the range through the lossless store.
+- **`kind:"summary"` journal tasks (5d)**: summary documents are enqueued
+  through the ordinary ingest queue with `kind: "summary"`, the same leases,
+  retries, tombstones and pruning, deduping on
+  `content_hash + prompt_version + model`; the drain writes them with
+  `source: "segment-summary"`.
+- **Config (5d)**: `ingestion.summaries` (`enabled`, `model`, `baseUrlEnv`,
+  `apiKeyEnv`, `maxOutputTokens`, `maxCharsPerSegment` off by default,
+  `concurrency`, `maxInputChars`, `timeoutMs`). `enabled: true` is safe in a
+  profile: effective availability also requires a private endpoint and the key
+  environment, so the varad profile is on exactly when `/etc/dsh/llm.env` is.
+- **Backfill CLI (5f)**: `memory backfill-transcripts --from-sessions <dir>
+  [--dry-run] [--roles both|user] [--apply] [--limit N] [--session <id>]
+  [--json]`. Full-fidelity reader (both roles, NO 2 000-char cap), transcript
+  store rows, deterministic segments, summary tasks; dry-run reports
+  sessions/messages/turns/segments/estimated tokens/requests/time and writes
+  nothing; apply is resumable and idempotent (re-run: 0 new rows, 0 new tasks).
+- **Tests (5d/5f)**: 22 new — pinned prompt/prompt-version determinism, secret
+  refusal in and out, pointer-header round-trip, long-segment map-reduce, output
+  cap, config/env gating, queue `kind` persistence, parser full fidelity,
+  backfill dry-run vs apply, idempotency. Suite **615** green. Live Qwen probe
+  (`test/live/summarizer-live.test.ts`, env-gated): pass, 1 request, 6.25 s,
+  204-char summary, pointer verified.
+- **Docs**: new `docs/SUMMARY_PIPELINE.md` (prompt contract, header format,
+  config, cost model, failure modes, re-summarize after a prompt bump);
+  `docs/TRANSCRIPTS.md` and `docs/TURN_JOURNAL.md` updated.
 
 ## 1.0.5 — 2026-11-24
 
